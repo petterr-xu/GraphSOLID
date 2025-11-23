@@ -16,6 +16,7 @@ from args import parse_args
 from src import solid,loss_fn
 from src.utils import VNG_utils
 from src.models import gnn,sage,gcn,gat,edge_learner,teacher,diffusion,mlp
+from src.neighbor_dist import get_PPR_adj, get_heat_adj, get_ins_neighbor_dist
 from src.denoise import unet
 warnings.filterwarnings("ignore")
 
