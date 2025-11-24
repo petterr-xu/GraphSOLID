@@ -15,8 +15,10 @@ from sklearn.metrics import balanced_accuracy_score, f1_score,classification_rep
 from args import parse_args
 from src import solid,loss_fn
 from src.utils import VNG_utils
+from src.tabdiff.models import unified_ctime_diffusion
 from src.models import gnn,sage,gcn,gat,edge_learner,teacher,diffusion,mlp
 from src.denoise import unet
+import src.utils.graphbuilder
 warnings.filterwarnings("ignore")
 
 def pre_train():
@@ -209,7 +211,7 @@ for r in range(repeatition):
         idx_info = VNG_utils.get_idx_info(data.y, n_cls, data_train_mask)
         class_num_list = n_data
         print("num of class in original training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
-        class_num_list, data_train_mask, idx_info, train_node_mask, train_edge_mask = VNG_utils.make_longtailed_data_remove(edge_index, data.y, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
+        class_num_list, data_train_mask, idx_info, train_node_mask, train_edge_mask = src.utils.graphbuilder.make_longtailed_data_remove(edge_index, data.y, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
         if args.keep_edge:
             train_edge_mask = torch.ones_like(train_edge_mask,dtype=torch.bool,device=train_edge_mask.device)
         print("num of class in LT-training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))

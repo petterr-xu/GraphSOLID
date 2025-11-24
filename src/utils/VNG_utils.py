@@ -18,7 +18,6 @@ import scipy.sparse as sp
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
-from torch_scatter import scatter_add
 from matplotlib.colors import Normalize
 from matplotlib.animation import FuncAnimation
 
@@ -82,6 +81,12 @@ def get_dataset(name, path, split_type='public'):
     elif name == 'Coauthor-CS':
         from torch_geometric.datasets import Coauthor
         return Coauthor(root=path, name='cs', transform=T.NormalizeFeatures())
+    elif name == 'Amazon-Products':
+        from torch_geometric.datasets import AmazonProducts
+        return AmazonProducts(root=path, transform=T.NormalizeFeatures())
+    elif name == 'Yelp':
+        from torch_geometric.datasets import Yelp
+        return Yelp(root=path, transform=T.NormalizeFeatures())
     else:
         raise NotImplementedError("Not Implemented Dataset!")
 
@@ -127,84 +132,84 @@ def make_random_data_remove(edge_index, label, n_data, n_cls, train_num, train_m
 
     return list(train_num), train_mask, idx_info, node_mask, edge_mask
 
-## Construct imb ##
-def make_imb_data(edge_index, label, n_data, n_cls, ratio, train_mask):
-    # Sort from major to minor
-    n_data = torch.tensor(n_data)
-    sorted_n_data, indices = torch.sort(n_data, descending=True)
-    inv_indices = np.zeros(n_cls, dtype=np.int64)
-    for i in range(n_cls):
-        inv_indices[indices[i].item()] = i
-    assert (torch.arange(len(n_data))[indices][torch.tensor(inv_indices)] - torch.arange(len(n_data))).sum().abs() < 1e-12
-    class_dis_ = class_dis(label,n_cls)
-    # Compute average number of nodes and apply the new rule
-    avg_num = (torch.sum(class_dis_) // n_cls).item()
-    class_num_list = []
-    n_round = []
+# ## Construct imb ##
+# def make_imb_data(edge_index, label, n_data, n_cls, ratio, train_mask):
+#     # Sort from major to minor
+#     n_data = torch.tensor(n_data)
+#     sorted_n_data, indices = torch.sort(n_data, descending=True)
+#     inv_indices = np.zeros(n_cls, dtype=np.int64)
+#     for i in range(n_cls):
+#         inv_indices[indices[i].item()] = i
+#     assert (torch.arange(len(n_data))[indices][torch.tensor(inv_indices)] - torch.arange(len(n_data))).sum().abs() < 1e-12
+#     class_dis_ = class_dis(label,n_cls)
+#     # Compute average number of nodes and apply the new rule
+#     avg_num = (torch.sum(class_dis_) // n_cls).item()
+#     class_num_list = []
+#     n_round = []
 
-    for i in range(n_cls):
-        if class_dis_[i].item() < avg_num:  # Minority class
-            new_count = max(1, int(sorted_n_data[i].item() * ratio))
-            class_num_list.append(new_count)
-            n_round.append(10)  # Use 10 rounds for minority classes
-        else:  # Majority class
-            class_num_list.append(sorted_n_data[i].item())  # Keep majority class unchanged
-            n_round.append(1)  # No need to remove nodes from majority class
+#     for i in range(n_cls):
+#         if class_dis_[i].item() < avg_num:  # Minority class
+#             new_count = max(1, int(sorted_n_data[i].item() * ratio))
+#             class_num_list.append(new_count)
+#             n_round.append(10)  # Use 10 rounds for minority classes
+#         else:  # Majority class
+#             class_num_list.append(sorted_n_data[i].item())  # Keep majority class unchanged
+#             n_round.append(1)  # No need to remove nodes from majority class
 
-    class_num_list = np.array(class_num_list)[inv_indices]
-    n_round = np.array(n_round)[inv_indices]
+#     class_num_list = np.array(class_num_list)[inv_indices]
+#     n_round = np.array(n_round)[inv_indices]
 
-    # Compute the number of nodes to be removed for each class
-    remove_class_num_list = [n_data[i].item() - class_num_list[i] for i in range(n_cls)]
-    remove_idx_list = [[] for _ in range(n_cls)]
-    cls_idx_list = []
-    index_list = torch.arange(len(train_mask), device=train_mask.device)
-    original_mask = train_mask.clone()
+#     # Compute the number of nodes to be removed for each class
+#     remove_class_num_list = [n_data[i].item() - class_num_list[i] for i in range(n_cls)]
+#     remove_idx_list = [[] for _ in range(n_cls)]
+#     cls_idx_list = []
+#     index_list = torch.arange(len(train_mask), device=train_mask.device)
+#     original_mask = train_mask.clone()
     
-    for i in range(n_cls):
-        cls_idx_list.append(index_list[(label == i) & original_mask])
+#     for i in range(n_cls):
+#         cls_idx_list.append(index_list[(label == i) & original_mask])
 
-    # Iteratively remove low-degree nodes for each class
-    for i in indices.numpy():
-        for r in range(1, n_round[i] + 1):
-            # Mask for nodes that have been removed
-            node_mask = label.new_ones(label.size(), dtype=torch.bool)
-            node_mask[sum(remove_idx_list, [])] = False
+#     # Iteratively remove low-degree nodes for each class
+#     for i in indices.numpy():
+#         for r in range(1, n_round[i] + 1):
+#             # Mask for nodes that have been removed
+#             node_mask = label.new_ones(label.size(), dtype=torch.bool)
+#             node_mask[sum(remove_idx_list, [])] = False
 
-            # Filter out edges connected to removed nodes
-            row, col = edge_index[0], edge_index[1]
-            row_mask = node_mask[row]
-            col_mask = node_mask[col]
-            edge_mask = row_mask & col_mask
+#             # Filter out edges connected to removed nodes
+#             row, col = edge_index[0], edge_index[1]
+#             row_mask = node_mask[row]
+#             col_mask = node_mask[col]
+#             edge_mask = row_mask & col_mask
 
-            # Compute degree based on remaining edges
-            degree = scatter_add(torch.ones_like(col[edge_mask]), col[edge_mask], dim_size=label.size(0)).to(row.device)
-            degree = degree[cls_idx_list[i]]
+#             # Compute degree based on remaining edges
+#             degree = scatter_add(torch.ones_like(col[edge_mask]), col[edge_mask], dim_size=label.size(0)).to(row.device)
+#             degree = degree[cls_idx_list[i]]
 
-            # Remove nodes with the lowest degree in this round
-            _, remove_idx = torch.topk(degree, (r * remove_class_num_list[i]) // n_round[i], largest=False)
-            remove_idx = cls_idx_list[i][remove_idx]
-            remove_idx_list[i] = list(remove_idx.to('cpu').numpy())
+#             # Remove nodes with the lowest degree in this round
+#             _, remove_idx = torch.topk(degree, (r * remove_class_num_list[i]) // n_round[i], largest=False)
+#             remove_idx = cls_idx_list[i][remove_idx]
+#             remove_idx_list[i] = list(remove_idx.to('cpu').numpy())
 
-    # Final mask for remaining nodes
-    node_mask = label.new_ones(label.size(), dtype=torch.bool)
-    node_mask[sum(remove_idx_list, [])] = False
+#     # Final mask for remaining nodes
+#     node_mask = label.new_ones(label.size(), dtype=torch.bool)
+#     node_mask[sum(remove_idx_list, [])] = False
 
-    # Filter edges to remove those connected to removed nodes
-    row, col = edge_index[0], edge_index[1]
-    row_mask = node_mask[row]
-    col_mask = node_mask[col]
-    edge_mask = row_mask & col_mask
+#     # Filter edges to remove those connected to removed nodes
+#     row, col = edge_index[0], edge_index[1]
+#     row_mask = node_mask[row]
+#     col_mask = node_mask[col]
+#     edge_mask = row_mask & col_mask
 
-    # Update train mask to reflect removed nodes
-    train_mask = node_mask & train_mask
-    idx_info = []
+#     # Update train mask to reflect removed nodes
+#     train_mask = node_mask & train_mask
+#     idx_info = []
     
-    for i in range(n_cls):
-        cls_indices = index_list[(label == i) & train_mask]
-        idx_info.append(cls_indices)
+#     for i in range(n_cls):
+#         cls_indices = index_list[(label == i) & train_mask]
+#         idx_info.append(cls_indices)
 
-    return list(class_num_list), train_mask, idx_info, node_mask, edge_mask
+#     return list(class_num_list), train_mask, idx_info, node_mask, edge_mask
 
 def get_step_split(imb_ratio, valid_each, labeling_ratio, all_idx, all_label, nclass):
     base_valid_each = valid_each
@@ -267,85 +272,6 @@ def get_step_split(imb_ratio, valid_each, labeling_ratio, all_idx, all_label, nc
     test_idx = list(set(after_train_idx)-set(valid_idx))
 
     return train_idx, valid_idx, test_idx, train_node
-
-
-def make_longtailed_data_remove(edge_index, label, n_data, n_cls, ratio, train_mask, max_n=500):
-    # Sort from major to minor
-    n_data = torch.tensor(n_data)
-    sorted_n_data, indices = torch.sort(n_data, descending=True)
-    MAX = min(sorted_n_data[0].item(), max_n)
-    inv_indices = np.zeros(n_cls, dtype=np.int64)
-    for i in range(n_cls):
-        inv_indices[indices[i].item()] = i
-    assert (torch.arange(len(n_data))[indices][torch.tensor(inv_indices)] - torch.arange(len(n_data))).sum().abs() < 1e-12
-
-    # Compute the number of nodes for each class following LT rules
-    mu = np.power(1/ratio, 1/(n_cls - 1))
-    n_round = []
-    class_num_list = []
-    for i in range(n_cls):
-        assert int(sorted_n_data[0].item() * np.power(mu, i)) >= 1
-        class_num_list.append(int(min(MAX * np.power(mu, i), sorted_n_data[i], max_n)))
-        """
-        Note that we remove low degree nodes sequentially (10 steps)
-        since degrees of remaining nodes are changed when some nodes are removed
-        """
-        if i < 1 and MAX >= sorted_n_data[0].item():
-            n_round.append(1)
-        else:
-            n_round.append(10)
-    class_num_list = np.array(class_num_list)
-    class_num_list = class_num_list[inv_indices]
-    n_round = np.array(n_round)[inv_indices]
-
-    # Compute the number of nodes which would be removed for each class
-    remove_class_num_list = [n_data[i].item()-class_num_list[i] for i in range(n_cls)]
-    remove_idx_list = [[] for _ in range(n_cls)]
-    cls_idx_list = []
-    index_list = torch.arange(len(train_mask),device=train_mask.device)
-    original_mask = train_mask.clone()
-    for i in range(n_cls):
-        cls_idx_list.append(index_list[(label == i) & original_mask])
-
-    for i in indices.numpy():
-        for r in range(1,n_round[i]+1):
-            # Find removed nodes
-            node_mask = label.new_ones(label.size(), dtype=torch.bool)
-            node_mask[sum(remove_idx_list,[])] = False
-
-            # Remove connection with removed nodes
-            row, col = edge_index[0], edge_index[1]
-            row_mask = node_mask[row]
-            col_mask = node_mask[col]
-            edge_mask = row_mask & col_mask
-
-            # Compute degree
-            degree = scatter_add(torch.ones_like(col[edge_mask]), col[edge_mask], dim_size=label.size(0)).to(row.device)
-            degree = degree[cls_idx_list[i]]
-
-            # Remove nodes with low degree first (number increases as round increases)
-            # Accumulation does not be problem since
-            _, remove_idx = torch.topk(degree, (r*remove_class_num_list[i])//n_round[i], largest=False)
-            remove_idx = cls_idx_list[i][remove_idx]
-            remove_idx_list[i] = list(remove_idx.to('cpu').numpy())
-
-    # Find removed nodes
-    node_mask = label.new_ones(label.size(), dtype=torch.bool)
-    node_mask[sum(remove_idx_list,[])] = False
-
-    # Remove connection with removed nodes
-    row, col = edge_index[0], edge_index[1]
-    row_mask = node_mask[row]
-    col_mask = node_mask[col]
-    edge_mask = row_mask & col_mask
-
-    train_mask = node_mask & train_mask
-    idx_info = []
-    for i in range(n_cls):
-        cls_indices = index_list[(label == i) & train_mask]
-        idx_info.append(cls_indices)
-
-    return list(class_num_list), train_mask, idx_info, node_mask, edge_mask
 
 
 def load_cora(file=None, re_norm_scale = 1, device="cuda:0"):
