@@ -54,6 +54,8 @@ def parse_args():
     parser.add_argument('--n_blocks', type=int, default=3, help='number of block of up and down sample in unet')
 
     ## tabdiff setup
+    parser.add_argument('--dloss_weight', type=float, default=1.0, help='weight for discrate loss weight')
+    parser.add_argument('--closs_weight', type=float, default=1.0, help='weight for continuous loss weight')
     
     
     args = parser.parse_args()

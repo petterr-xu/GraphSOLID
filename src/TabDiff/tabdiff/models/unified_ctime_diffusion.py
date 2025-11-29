@@ -92,7 +92,7 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         else:
             raise NotImplementedError(f"The noise schedule--{self.cat_scheduler}-- is not implemented for discrete data at CTIME ")
 
-    def mixed_loss(self, x):
+    def mixed_loss(self, x, guidance: torch.Tensor, guidance_mask:torch.Tensor):
         b = x.shape[0]
         device = x.device
         # 拆分数值和分类特征
