@@ -102,6 +102,7 @@ def train_diffusion_model():
         targets = F.one_hot(targets,num_classes=n_cls)
         soft_labels = teacher_model.softmax_with_temperature(inputs,args.temperature)
         targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
+        
         inputs = torch.unsqueeze(inputs,dim=1)
         # print(inputs.shape)
         dif_optimizer.zero_grad()
