@@ -28,11 +28,20 @@ class PositionalEmbedding(torch.nn.Module):
 
 
 class MLPDiffusion(nn.Module):
-    def __init__(self, d_in, dim_t = 512, use_mlp=True):
+    def __init__(self, d_in, dim_t=512, use_mlp=True, num_classes=None):
         super().__init__()
         self.dim_t = dim_t
+        self.num_classes = num_classes
 
         self.proj = nn.Linear(d_in, dim_t)
+        
+        # 添加类别嵌入层
+        if num_classes is not None:
+            self.class_embedding = nn.Sequential(
+                nn.Embedding(num_classes, dim_t),
+                nn.Linear(dim_t, dim_t),
+                nn.SiLU()
+            )
 
         self.mlp = nn.Sequential(
             nn.Linear(dim_t, dim_t * 2),
@@ -53,10 +62,15 @@ class MLPDiffusion(nn.Module):
         
         self.use_mlp = use_mlp
     
-    def forward(self, x, timesteps):
+    def forward(self, x, timesteps, class_labels=None):
         emb = self.map_noise(timesteps)
-        emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
+        emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape)  # swap sin/cos
         emb = self.time_embed(emb)
+        
+        # 添加类别条件
+        if self.num_classes is not None and class_labels is not None:
+            class_emb = self.class_embedding(class_labels)
+            emb = emb + class_emb
     
         x = self.proj(x) + emb
         return self.mlp(x)
@@ -66,35 +80,55 @@ class UniModMLP(nn.Module):
         Input:
             x_num: [bs, d_numerical]
             x_cat: [bs, len(categories)]
+            class_labels: [bs, ] 类别标签
         Output:
             x_num_pred: [bs, d_numerical], the predicted mean for numerical data
             x_cat_pred: [bs, sum(categories)], the predicted UNORMALIZED logits for categorical data
     """
     def __init__(
             self, d_numerical, categories, num_layers, d_token,
-            n_head = 1, factor = 4, bias = True, dim_t=512, use_mlp=True, **kwargs
+            n_head=1, factor=4, bias=True, dim_t=512, use_mlp=True, 
+            num_classes=None,  # 新增：类别数量
+            **kwargs
         ):
         super().__init__()
         self.d_numerical = d_numerical
         self.categories = categories
+        self.num_classes = num_classes
 
-        self.tokenizer = Tokenizer(d_numerical, categories, d_token, bias = bias)
-        self.encoder = Transformer(num_layers, d_token, n_head, d_token, factor)
+        self.tokenizer = Tokenizer(d_numerical, categories, d_token, bias=bias)
+        self.encoder = Transformer(
+            num_layers, d_token, n_head, d_token, factor,
+            num_classes=num_classes  # 传递类别数量
+        )
         d_in = d_token * (d_numerical + len(categories))
-        self.mlp = MLPDiffusion(d_in, dim_t=dim_t, use_mlp=use_mlp)
-        self.decoder = Transformer(num_layers, d_token, n_head, d_token, factor)
+        self.mlp = MLPDiffusion(
+            d_in, dim_t=dim_t, use_mlp=use_mlp,
+            num_classes=num_classes  # 传递类别数量
+        )
+        self.decoder = Transformer(
+            num_layers, d_token, n_head, d_token, factor,
+            num_classes=num_classes  # 传递类别数量
+        )
         self.detokenizer = Reconstructor(d_numerical, categories, d_token)
         
         self.model = nn.ModuleList([self.tokenizer, self.encoder, self.mlp, self.decoder, self.detokenizer])
 
-    def forward(self, x_num, x_cat, timesteps):
+    def forward(self, x_num, x_cat, timesteps, class_labels=None):
         e = self.tokenizer(x_num, x_cat)
-        decoder_input = e[:, 1:, :]        # ignore the first CLS token. 
-        y = self.encoder(decoder_input)
-        pred_y = self.mlp(y.reshape(y.shape[0], -1), timesteps)
-        pred_e = self.decoder(pred_y.reshape(*y.shape))
+        decoder_input = e[:, 1:, :]  # ignore the first CLS token. 
+        
+        # 编码器接收类别标签
+        y = self.encoder(decoder_input, class_labels=class_labels)
+        
+        # MLP扩散模型接收类别标签
+        pred_y = self.mlp(y.reshape(y.shape[0], -1), timesteps, class_labels=class_labels)
+        
+        # 解码器接收类别标签
+        pred_e = self.decoder(pred_y.reshape(*y.shape), class_labels=class_labels)
+        
         x_num_pred, x_cat_pred = self.detokenizer(pred_e)
-        x_cat_pred = torch.cat(x_cat_pred, dim=-1) if len(x_cat_pred)>0 else torch.zeros_like(x_cat).to(x_num_pred.dtype)
+        x_cat_pred = torch.cat(x_cat_pred, dim=-1) if len(x_cat_pred) > 0 else torch.zeros_like(x_cat).to(x_num_pred.dtype)
 
         return x_num_pred, x_cat_pred
 
@@ -102,21 +136,20 @@ class UniModMLP(nn.Module):
 class Precond(nn.Module):
     def __init__(self,
         denoise_fn,
-        sigma_data = 0.5,              # Expected standard deviation of the training data.
-        net_conditioning = "sigma",
+        sigma_data=0.5,              # Expected standard deviation of the training data.
+        net_conditioning="sigma",
     ):
         super().__init__()
         self.sigma_data = sigma_data
         self.net_conditioning = net_conditioning
         self.denoise_fn_F = denoise_fn
 
-    def forward(self, x_num, x_cat, t, sigma):
-
+    def forward(self, x_num, x_cat, t, sigma, class_labels=None):
         x_num = x_num.to(torch.float32)
 
         sigma = sigma.to(torch.float32)
         assert sigma.ndim == 2
-        if sigma.dim() > 1: # if learnable column-wise noise schedule, sigma conditioning is set to the defaults schedule of rho=7
+        if sigma.dim() > 1:  # if learnable column-wise noise schedule
             sigma_cond = (0.002 ** (1/7) + t * (80 ** (1/7) - 0.002 ** (1/7))).pow(7)
         else:
             sigma_cond = sigma 
@@ -129,9 +162,10 @@ class Precond(nn.Module):
 
         x_in = c_in * x_num
         if self.net_conditioning == "sigma":
-            F_x, x_cat_pred = self.denoise_fn_F(x_in, x_cat, c_noise.flatten())
+            # 传递类别标签到去噪函数
+            F_x, x_cat_pred = self.denoise_fn_F(x_in, x_cat, c_noise.flatten(), class_labels=class_labels)
         elif self.net_conditioning == "t":
-            F_x, x_cat_pred = self.denoise_fn_F(x_in, x_cat, t)
+            F_x, x_cat_pred = self.denoise_fn_F(x_in, x_cat, t, class_labels=class_labels)
 
         assert F_x.dtype == dtype
         D_x = c_skip * x_num + c_out * F_x.to(torch.float32)
@@ -158,10 +192,8 @@ class Model(nn.Module):
         else:
             self.denoise_fn_D = denoise_fn
 
-    def forward(self, x_num, x_cat, t, sigma=None):
+    def forward(self, x_num, x_cat, t, sigma=None, class_labels=None):
         if self.precond:
-            return self.denoise_fn_D(x_num, x_cat, t, sigma)
+            return self.denoise_fn_D(x_num, x_cat, t, sigma, class_labels=class_labels)
         else:
-            return self.denoise_fn_D(x_num, x_cat, t)
-
-
+            return self.denoise_fn_D(x_num, x_cat, t, class_labels=class_labels)

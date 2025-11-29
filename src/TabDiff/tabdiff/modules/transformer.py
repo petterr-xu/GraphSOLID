@@ -67,7 +67,7 @@ class Tokenizer(nn.Module):
 
 
 class MultiheadAttention(nn.Module):
-    def __init__(self, d, n_heads, dropout, initialization = 'kaiming'):
+    def __init__(self, d, n_heads, dropout, initialization='kaiming'):
 
         if n_heads > 1:
             assert d % n_heads == 0
@@ -98,7 +98,7 @@ class MultiheadAttention(nn.Module):
             .reshape(batch_size * self.n_heads, n_tokens, d_head)
         )
 
-    def forward(self, x_q, x_kv, key_compression = None, value_compression = None):
+    def forward(self, x_q, x_kv, key_compression=None, value_compression=None):
   
         q, k, v = self.W_q(x_q), self.W_k(x_kv), self.W_v(x_kv)
         for tensor in [q, k, v]:
@@ -145,14 +145,24 @@ class Transformer(nn.Module):
         n_heads: int,
         d_out: int,
         d_ffn_factor: int,
-        attention_dropout = 0.0,
-        ffn_dropout = 0.0,
-        residual_dropout = 0.0,
-        activation = 'relu',
-        prenormalization = True,
-        initialization = 'kaiming',      
+        attention_dropout=0.0,
+        ffn_dropout=0.0,
+        residual_dropout=0.0,
+        activation='relu',
+        prenormalization=True,
+        initialization='kaiming',
+        num_classes=None,  # 新增：类别数量
     ):
         super().__init__()
+        
+        # 添加类别嵌入层
+        self.num_classes = num_classes
+        if num_classes is not None:
+            self.class_embedding = nn.Sequential(
+                nn.Embedding(num_classes, d_token),
+                nn.Linear(d_token, d_token),
+                nn.SiLU()
+            )
 
         def make_normalization():
             return nn.LayerNorm(d_token)
@@ -179,8 +189,6 @@ class Transformer(nn.Module):
 
         self.activation = nn.ReLU()
         self.last_activation = nn.ReLU()
-        # self.activation = lib.get_activation_fn(activation)
-        # self.last_activation = lib.get_nonglu_activation_fn(activation)
         self.prenormalization = prenormalization
         self.last_normalization = make_normalization() if prenormalization else None
         self.ffn_dropout = ffn_dropout
@@ -204,13 +212,17 @@ class Transformer(nn.Module):
             x = layer[f'norm{norm_idx}'](x)
         return x
 
-    def forward(self, x):
+    def forward(self, x, class_labels=None):
+        # 添加类别条件到输入
+        if self.num_classes is not None and class_labels is not None:
+            class_emb = self.class_embedding(class_labels)[:, None, :]  # [batch, 1, d_token]
+            x = x + class_emb  # 广播到所有token
+        
         for layer_idx, layer in enumerate(self.layers):
             is_last_layer = layer_idx + 1 == len(self.layers)
 
             x_residual = self._start_residual(x, layer, 0)
             x_residual = layer['attention'](
-                # for the last attention, it is enough to process only [CLS]
                 x_residual,
                 x_residual,
             )
@@ -252,7 +264,6 @@ class Reconstructor(nn.Module):
         recon_x_cat = []
 
         for i, recon in enumerate(self.cat_recons):
-      
             recon_x_cat.append(recon(h_cat[:, i]))
 
         return recon_x_num, recon_x_cat
