@@ -141,7 +141,7 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         #  与 “职业（分类）” 的关联），避免两种特征分离处理导致的关联性丢失（论文核心创新之一，）。
         model_out_num, model_out_cat = self._denoise_fn(   
             x_num_t, x_cat_t_soft,
-            t.squeeze(), sigma=sigma_num
+            t.squeeze(), sigma=sigma_num, guidance = guidance * guidance_mask
         )
 
         d_loss = torch.zeros((1,)).float()
