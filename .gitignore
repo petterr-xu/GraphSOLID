@@ -2,4 +2,4 @@ data/
 .history/
 __pycache__/
 .DS_Store
-.whl
+*.whl
