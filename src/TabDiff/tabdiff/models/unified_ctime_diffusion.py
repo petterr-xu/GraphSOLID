@@ -2,7 +2,7 @@ import torch.nn.functional as F
 import torch
 import math
 import numpy as np
-from tabdiff.models.noise_schedule import *
+from .noise_schedule import *
 from tqdm import tqdm
 from itertools import chain
 

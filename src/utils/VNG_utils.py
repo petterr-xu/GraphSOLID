@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.utils.data
 import torch.nn.functional as F
 import dgl
-import dgl.data as data
 
 import os
 import re
@@ -273,50 +272,41 @@ def get_step_split(imb_ratio, valid_each, labeling_ratio, all_idx, all_label, nc
 
     return train_idx, valid_idx, test_idx, train_node
 
+# def load_cora_vanilla(load_cache_file:bool = True,parent_file_path = "CGDM-Im\\dataset\\cora\\"):
+#     """返回一个没有划分训练集、测试集、验证集的图数据.节点的label为onehot编码
 
-def load_cora(file=None, re_norm_scale = 1, device="cuda:0"):
-    dataset = data.CoraGraphDataset(force_reload=True,verbose=False)
-    graph = dataset[0]
-    graph.ndata['label'] = F.one_hot(graph.ndata['label'],7)
-    graph.to(device)
-    return graph
-
-
-def load_cora_vanilla(load_cache_file:bool = True,parent_file_path = "CGDM-Im\\dataset\\cora\\"):
-    """返回一个没有划分训练集、测试集、验证集的图数据.节点的label为onehot编码
-
-    Args:
-        load_cache_file (bool, optional): _description_. Defaults to True.
-        parent_file_path (str, optional): _description_. Defaults to "CGDM-Im\dataset\cora\".
-    """
-    parent_file_path = parent_file_path.replace("\\",os.sep)
-    if load_cache_file:
-        try:
-            dgl_graph_list,_ = dgl.load_graphs(parent_file_path+"Cora_vanilla.bin")
-            return dgl_graph_list[0]
-        except Exception as ex :
-            print("local Cora dataset doesn't exist, construct from raw data.")
-    raw_data = pd.read_csv(parent_file_path + 'cora.content',sep = '\t',header = None)
-    num = raw_data.shape[0]
-    a = list(raw_data.index)
-    b = list(raw_data[0])
-    c = zip(b,a)
-    map = dict(c)
-    features = raw_data.iloc[:,1:-1]
-    labels = pd.get_dummies(raw_data[1434])
-    raw_data_cites = pd.read_csv(parent_file_path + 'cora.cites',sep = '\t',header = None)
-    matrix = np.zeros((num,num))
-    for i ,j in zip(raw_data_cites[0],raw_data_cites[1]):
-        x = map[i] ; y = map[j]
-        matrix[x][y] = matrix[y][x] = 1
-    features = features.values.tolist()
-    labels = labels.values.tolist()
-    nx_graph = nx.from_numpy_array(matrix)
-    dgl_graph = dgl.from_networkx(nx_graph)
-    dgl_graph.ndata['feat'] = torch.Tensor(features).to(torch.float)
-    dgl_graph.ndata['label'] = torch.Tensor(labels).to(torch.int)
-    dgl.save_graphs(parent_file_path+"Cora_vanilla.bin",dgl_graph)
-    return dgl_graph
+#     Args:
+#         load_cache_file (bool, optional): _description_. Defaults to True.
+#         parent_file_path (str, optional): _description_. Defaults to "CGDM-Im\dataset\cora\".
+#     """
+#     parent_file_path = parent_file_path.replace("\\",os.sep)
+#     if load_cache_file:
+#         try:
+#             dgl_graph_list,_ = dgl.load_graphs(parent_file_path+"Cora_vanilla.bin")
+#             return dgl_graph_list[0]
+#         except Exception as ex :
+#             print("local Cora dataset doesn't exist, construct from raw data.")
+#     raw_data = pd.read_csv(parent_file_path + 'cora.content',sep = '\t',header = None)
+#     num = raw_data.shape[0]
+#     a = list(raw_data.index)
+#     b = list(raw_data[0])
+#     c = zip(b,a)
+#     map = dict(c)
+#     features = raw_data.iloc[:,1:-1]
+#     labels = pd.get_dummies(raw_data[1434])
+#     raw_data_cites = pd.read_csv(parent_file_path + 'cora.cites',sep = '\t',header = None)
+#     matrix = np.zeros((num,num))
+#     for i ,j in zip(raw_data_cites[0],raw_data_cites[1]):
+#         x = map[i] ; y = map[j]
+#         matrix[x][y] = matrix[y][x] = 1
+#     features = features.values.tolist()
+#     labels = labels.values.tolist()
+#     nx_graph = nx.from_numpy_array(matrix)
+#     dgl_graph = dgl.from_networkx(nx_graph)
+#     dgl_graph.ndata['feat'] = torch.Tensor(features).to(torch.float)
+#     dgl_graph.ndata['label'] = torch.Tensor(labels).to(torch.int)
+#     dgl.save_graphs(parent_file_path+"Cora_vanilla.bin",dgl_graph)
+#     return dgl_graph
 
 def confidence_dis(soft_labels:torch.Tensor,hard_labels:torch.Tensor,num_classes):
     if hard_labels.dim() > 1:
@@ -329,46 +319,46 @@ def confidence_dis(soft_labels:torch.Tensor,hard_labels:torch.Tensor,num_classes
     dis = torch.stack(dis)
     return dis
 
-def neigh_class_dis(ori_graph:dgl.DGLGraph,num_classes=None):
-    graph = copy.deepcopy(ori_graph)
-    labels = graph.ndata["label"]
-    if labels.dim() > 1:
-        if len(labels[0]) > 1:
-            labels = torch.argmax(labels,labels.dim()-1)
-            graph.ndata["label"] = labels
-        elif len(labels[0]) == 1:
-            labels = labels.squeeze(1)
-            graph.ndata["label"] = labels
-    if num_classes == None:
-        num_classes = torch.max(labels)-torch.min(labels)+1
-    dis_matrix = torch.Tensor(num_classes,num_classes).to(graph.device)
-    for node_class in range(num_classes):
-        class_mask = (labels == node_class)
-        # print(torch.sum(class_mask))
-        # 提取某类节点的索引
-        class_indices = torch.nonzero(class_mask,as_tuple=True)[0]
-        # 遍历索引，统计该类节点的邻居分布
-        dis_count = torch.zeros(size=[1,num_classes]).to(graph.device)
-        for node in class_indices:
-            # 提取邻居
-            subgraph = dgl.in_subgraph(graph, node,relabel_nodes=True)
-            # 统计邻居类型分布
-            label_dis = torch.bincount(subgraph.ndata["label"].to(torch.int),minlength=num_classes)
-            label_dis[node_class] -= 1 # 去除seed节点本身的干扰
-            dis_count += label_dis
-        dis_matrix[node_class] = dis_count / torch.sum(dis_count)
-    return dis_matrix
+# def neigh_class_dis(ori_graph:dgl.DGLGraph,num_classes=None):
+#     graph = copy.deepcopy(ori_graph)
+#     labels = graph.ndata["label"]
+#     if labels.dim() > 1:
+#         if len(labels[0]) > 1:
+#             labels = torch.argmax(labels,labels.dim()-1)
+#             graph.ndata["label"] = labels
+#         elif len(labels[0]) == 1:
+#             labels = labels.squeeze(1)
+#             graph.ndata["label"] = labels
+#     if num_classes == None:
+#         num_classes = torch.max(labels)-torch.min(labels)+1
+#     dis_matrix = torch.Tensor(num_classes,num_classes).to(graph.device)
+#     for node_class in range(num_classes):
+#         class_mask = (labels == node_class)
+#         # print(torch.sum(class_mask))
+#         # 提取某类节点的索引
+#         class_indices = torch.nonzero(class_mask,as_tuple=True)[0]
+#         # 遍历索引，统计该类节点的邻居分布
+#         dis_count = torch.zeros(size=[1,num_classes]).to(graph.device)
+#         for node in class_indices:
+#             # 提取邻居
+#             subgraph = dgl.in_subgraph(graph, node,relabel_nodes=True)
+#             # 统计邻居类型分布
+#             label_dis = torch.bincount(subgraph.ndata["label"].to(torch.int),minlength=num_classes)
+#             label_dis[node_class] -= 1 # 去除seed节点本身的干扰
+#             dis_count += label_dis
+#         dis_matrix[node_class] = dis_count / torch.sum(dis_count)
+#     return dis_matrix
 
-def node_class_dis(graph:dgl.DGLGraph,mask=None,num_classes=None,norm=False)->torch.Tensor:
-    labels = graph.ndata["label"]
-    if mask is not None:
-        labels = labels[mask]
-    if labels.dim() > 1:
-        if len(labels[0]) > 1:
-            labels = torch.argmax(labels,dim=labels.dim()-1)
-        else:
-            labels = labels.squeeze(1)
-    return class_dis(labels,num_classes,norm)
+# def node_class_dis(graph:dgl.DGLGraph,mask=None,num_classes=None,norm=False)->torch.Tensor:
+#     labels = graph.ndata["label"]
+#     if mask is not None:
+#         labels = labels[mask]
+#     if labels.dim() > 1:
+#         if len(labels[0]) > 1:
+#             labels = torch.argmax(labels,dim=labels.dim()-1)
+#         else:
+#             labels = labels.squeeze(1)
+#     return class_dis(labels,num_classes,norm)
 
 def class_dis(labels,num_classes=None,norm=False):
     if num_classes == None:
@@ -382,73 +372,73 @@ def class_dis(labels,num_classes=None,norm=False):
     return class_dis
 
 
-def imbalanced_train_schedule(graph:dgl.DGLGraph,imb_ratio,num_class,val_size,test_size,bias=0,minimum_train_size=None):
-    assert imb_ratio > 1, "Imbalanced ratio must higher then 1, but get {}.".format(imb_ratio)
-    class_dis = node_class_dis(graph,num_classes=num_class)
-    class_size_rank,class_rank = torch.sort(class_dis,descending=True)
-    majority_train_size = class_size_rank[0]-val_size-test_size-bias
-    mu = np.power(1/imb_ratio, 1/(num_class - 1))
-    train_schedule = torch.empty([num_class],dtype=torch.int32)
-    for i in range(num_class):
-        class_ = class_rank[i]
-        train_schedule[class_] = int(majority_train_size * np.power(mu, i))
-        assert (train_schedule[class_] + val_size + test_size) <= class_size_rank[i],"Schedule out of maximum size for train {}, val {}, test {} while class {} only has {} nodes".format(
-            train_schedule[class_],val_size,test_size,class_,class_size_rank[i])
-        if minimum_train_size is not None:
-            assert train_schedule[class_] >= minimum_train_size,"Train size must higher than {}, however class {} gets {} train size while imbalance ratio is {}".format(
-                minimum_train_size,class_,train_schedule[class_],imb_ratio)
-    return train_schedule
+# def imbalanced_train_schedule(graph:dgl.DGLGraph,imb_ratio,num_class,val_size,test_size,bias=0,minimum_train_size=None):
+#     assert imb_ratio > 1, "Imbalanced ratio must higher then 1, but get {}.".format(imb_ratio)
+#     class_dis = node_class_dis(graph,num_classes=num_class)
+#     class_size_rank,class_rank = torch.sort(class_dis,descending=True)
+#     majority_train_size = class_size_rank[0]-val_size-test_size-bias
+#     mu = np.power(1/imb_ratio, 1/(num_class - 1))
+#     train_schedule = torch.empty([num_class],dtype=torch.int32)
+#     for i in range(num_class):
+#         class_ = class_rank[i]
+#         train_schedule[class_] = int(majority_train_size * np.power(mu, i))
+#         assert (train_schedule[class_] + val_size + test_size) <= class_size_rank[i],"Schedule out of maximum size for train {}, val {}, test {} while class {} only has {} nodes".format(
+#             train_schedule[class_],val_size,test_size,class_,class_size_rank[i])
+#         if minimum_train_size is not None:
+#             assert train_schedule[class_] >= minimum_train_size,"Train size must higher than {}, however class {} gets {} train size while imbalance ratio is {}".format(
+#                 minimum_train_size,class_,train_schedule[class_],imb_ratio)
+#     return train_schedule
 
-def edge_dataset_split(graph:dgl.DGLGraph,val_test_ratio=1):
-    node_id = torch.tensor([i for i in range(graph.num_nodes()) if graph.ndata['train_mask'][i]]).to(graph.device)
-    sub_graph = dgl.out_subgraph(graph,node_id)
-    train_pos_u, train_pos_v = sub_graph.edges()
-    u, v = graph.edges()
+# def edge_dataset_split(graph:dgl.DGLGraph,val_test_ratio=1):
+#     node_id = torch.tensor([i for i in range(graph.num_nodes()) if graph.ndata['train_mask'][i]]).to(graph.device)
+#     sub_graph = dgl.out_subgraph(graph,node_id)
+#     train_pos_u, train_pos_v = sub_graph.edges()
+#     u, v = graph.edges()
 
-    # 将子图边列表中的边存储在一个集合中
-    train_edges_set = set(zip(train_pos_u.tolist(), train_pos_v.tolist()))
+#     # 将子图边列表中的边存储在一个集合中
+#     train_edges_set = set(zip(train_pos_u.tolist(), train_pos_v.tolist()))
 
-    # 初始化新的边列表，用于存储删除子图边后的边
-    rest_u = []
-    rest_v = []
+#     # 初始化新的边列表，用于存储删除子图边后的边
+#     rest_u = []
+#     rest_v = []
 
-    # 遍历第一个边列表，检查每一条边是否在子图边列表中
-    for src, dst in zip(u.tolist(), v.tolist()):
-        if (src, dst) not in train_edges_set:
-            rest_u.append(src)
-            rest_v.append(dst)
-    rest_u = torch.tensor(rest_u,device=graph.device)
-    rest_v = torch.tensor(rest_v,device=graph.device)
-    num_rest_edges = len(rest_u)
-    num_val = (val_test_ratio * num_rest_edges) // (val_test_ratio + 1)
-    eids = np.arange(num_rest_edges)
-    eids = np.random.permutation(eids)
-    val_pos_u, val_pos_v = rest_u[eids[0:num_val]], rest_v[eids[0:num_val]]
-    test_pos_u, test_pos_v = rest_u[eids[num_val:]], rest_v[eids[num_val:]]
+#     # 遍历第一个边列表，检查每一条边是否在子图边列表中
+#     for src, dst in zip(u.tolist(), v.tolist()):
+#         if (src, dst) not in train_edges_set:
+#             rest_u.append(src)
+#             rest_v.append(dst)
+#     rest_u = torch.tensor(rest_u,device=graph.device)
+#     rest_v = torch.tensor(rest_v,device=graph.device)
+#     num_rest_edges = len(rest_u)
+#     num_val = (val_test_ratio * num_rest_edges) // (val_test_ratio + 1)
+#     eids = np.arange(num_rest_edges)
+#     eids = np.random.permutation(eids)
+#     val_pos_u, val_pos_v = rest_u[eids[0:num_val]], rest_v[eids[0:num_val]]
+#     test_pos_u, test_pos_v = rest_u[eids[num_val:]], rest_v[eids[num_val:]]
 
-    adj = sp.coo_matrix((np.ones(len(u.cpu())), (u.cpu().numpy(), v.cpu().numpy())))
-    # 2708*2708 空边
-    adj_neg = 1-adj.todense()-np.eye(graph.num_nodes())
-    neg_u, neg_v = np.where(adj_neg!=0)
-    neg_eids = np.random.choice(len(neg_u), graph.number_of_edges())
-    start = 0
-    end = len(train_pos_u)
-    train_neg_u, train_neg_v = neg_u[neg_eids[start:end]], neg_v[neg_eids[start:end]]
-    start = end
-    end = start+len(val_pos_u)
-    val_neg_u, val_neg_v = neg_u[neg_eids[start:end]], neg_v[neg_eids[start:end]]
-    start = end
-    end = start+len(test_pos_u)
-    test_neg_u, test_neg_v = neg_u[neg_eids[start:end]], neg_v[neg_eids[start:end]]
-    #positive graph
-    train_pos_g = dgl.graph((train_pos_u, train_pos_v), num_nodes=graph.number_of_nodes())
-    val_pos_g = dgl.graph((val_pos_u, val_pos_v), num_nodes=graph.number_of_nodes())
-    test_pos_g = dgl.graph((test_pos_u, test_pos_v), num_nodes=graph.number_of_nodes())
-    #negative graph
-    train_neg_g = dgl.graph((train_neg_u, train_neg_v), num_nodes=graph.number_of_nodes())
-    val_neg_g = dgl.graph((val_neg_u, val_neg_v), num_nodes=graph.number_of_nodes())
-    test_neg_g = dgl.graph((test_neg_u, test_neg_v), num_nodes=graph.number_of_nodes())
-    return [train_pos_g,val_pos_g,test_pos_g],[train_neg_g,val_neg_g,test_neg_g]
+#     adj = sp.coo_matrix((np.ones(len(u.cpu())), (u.cpu().numpy(), v.cpu().numpy())))
+#     # 2708*2708 空边
+#     adj_neg = 1-adj.todense()-np.eye(graph.num_nodes())
+#     neg_u, neg_v = np.where(adj_neg!=0)
+#     neg_eids = np.random.choice(len(neg_u), graph.number_of_edges())
+#     start = 0
+#     end = len(train_pos_u)
+#     train_neg_u, train_neg_v = neg_u[neg_eids[start:end]], neg_v[neg_eids[start:end]]
+#     start = end
+#     end = start+len(val_pos_u)
+#     val_neg_u, val_neg_v = neg_u[neg_eids[start:end]], neg_v[neg_eids[start:end]]
+#     start = end
+#     end = start+len(test_pos_u)
+#     test_neg_u, test_neg_v = neg_u[neg_eids[start:end]], neg_v[neg_eids[start:end]]
+#     #positive graph
+#     train_pos_g = dgl.graph((train_pos_u, train_pos_v), num_nodes=graph.number_of_nodes())
+#     val_pos_g = dgl.graph((val_pos_u, val_pos_v), num_nodes=graph.number_of_nodes())
+#     test_pos_g = dgl.graph((test_pos_u, test_pos_v), num_nodes=graph.number_of_nodes())
+#     #negative graph
+#     train_neg_g = dgl.graph((train_neg_u, train_neg_v), num_nodes=graph.number_of_nodes())
+#     val_neg_g = dgl.graph((val_neg_u, val_neg_v), num_nodes=graph.number_of_nodes())
+#     test_neg_g = dgl.graph((test_neg_u, test_neg_v), num_nodes=graph.number_of_nodes())
+#     return [train_pos_g,val_pos_g,test_pos_g],[train_neg_g,val_neg_g,test_neg_g]
 
 
 def random_edge_dataset_split(graph:dgl.DGLGraph,split_schedule:dict):
@@ -534,49 +524,6 @@ def _graph_dataset_split(graph:dgl.DGLGraph,num_classes,split_schedule:dict):
     graph.ndata["train_mask"] = train_mask.to(device)
     graph.ndata["val_mask"] = val_mask.to(device)
     return graph
-
-def cora_dataset_split(split_schedule:dict,load_cache_file:bool = True,parent_file_path = "CGDM-Im\\dataset\\cora\\"):
-    """返回一个根据指定方案划分好的cora数据集
-    Parameters
-    ----------
-    split_schedule : dict
-        split_schedule={"train":train_schedule,"val":val_schedule,"test":test_schedule}, 
-        train_schedule is an Array-like object and contain 7 elements(in correspondence to 7 classes of Cora node), so as other schedule.
-    load_cache_file : bool, optional
-        _description_, by default True
-    parent_file_path : str, optional
-        _description_, by default "CGDM-Im\dataset\cora\"
-    
-    Returns
-    ---------
-    """
-    num_classes = 7
-    graph = load_cora_raw() #load_cora_vanilla(load_cache_file,parent_file_path)
-    _graph_dataset_split(graph,num_classes,split_schedule)
-    # _graph_dataset_split(graph,num_classes,split_schedule)
-    return graph
-
-
-def load_cora_raw(load_cache_file:bool = True,parent_file_path = "CGDM-Im\\dataset\\cora\\"):
-    """从文件中（可选）读取Cora原数据，并返回一个dgl图，遵循dgl的数据集划分
-
-    Parameters
-    ----------
-        load_cache_file (bool, optional): 是否从缓存文件中直接读取图数据（此前执行过该程序可置为True以节省时间）. Defaults to True.
-        parent_file_path (str, optional): _description_. Defaults to "CGDM-Im\dataset\cora\".
-
-    Returns
-    ---------
-        _type_: _description_
-    """
-    parent_file_path = parent_file_path.replace("\\",os.sep)
-    dgl_graph = load_cora_vanilla(load_cache_file,parent_file_path)
-    dgl_org_cora_graph = load_cora()
-    dgl_graph.ndata['train_mask'] = dgl_org_cora_graph.ndata["train_mask"].to(torch.bool)
-    dgl_graph.ndata['val_mask'] = dgl_org_cora_graph.ndata["val_mask"].to(torch.bool)
-    dgl_graph.ndata['test_mask'] = dgl_org_cora_graph.ndata["test_mask"].to(torch.bool)
-    # dgl.save_graphs(parent_file_path+"Cora.bin",dgl_graph)
-    return dgl_graph
 
 def dis_based_class_mask(labels: torch.Tensor, class_dis, num_class, mask_size, beta, adjustment_factor=1.0, device="cuda:0"):
     """

@@ -1,7 +1,7 @@
 import os.path as osp
 import json
 from ..data import *
-import VNG_utils
+from . import VNG_utils
 import torch
 import numpy as np
 from typing import Tuple, List, Optional
@@ -70,7 +70,7 @@ def load_tab_dataset_info(name, path, split_type='public') -> TabDataset:
     - `path`: 数据集存储路径。
     - `split_type`: 图数据集的划分类型，默认为 'public'
     """
-    graph_dataset = VNG_utils.get_dataset(name, path, split_type)
+    graph_dataset = VNG_utils.get_dataset(name, path, split_type, normalize_features=False)
     graph = _get_graph_from_dataset(graph_dataset)
 
     feat = _get_feature_tensor(graph)

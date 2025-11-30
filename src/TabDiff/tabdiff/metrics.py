@@ -3,8 +3,8 @@ import numpy as np
 import torch
 import pandas as pd
 # Metrics
-from eval.mle.mle import get_evaluator
-from eval.visualize_density import plot_density
+from ..eval.mle.mle import get_evaluator
+from ..eval.visualize_density import plot_density
 from sdmetrics.reports.single_table import QualityReport, DiagnosticReport
 from sdmetrics.single_table import LogisticDetection
 from sklearn.preprocessing import OneHotEncoder

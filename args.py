@@ -56,6 +56,8 @@ def parse_args():
     ## tabdiff setup
     parser.add_argument('--dloss_weight', type=float, default=1.0, help='weight for discrate loss weight')
     parser.add_argument('--closs_weight', type=float, default=1.0, help='weight for continuous loss weight')
+    parser.add_argument('--denoise_layers', type=int, default=2, help='number of layers for denoising transformer')
+    parser.add_argument('--d_token', type=int, default=4, help='token dimension for denoising transformer')
     
     
     args = parser.parse_args()
