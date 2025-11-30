@@ -66,27 +66,27 @@ def get_idx_info(label, n_cls, train_mask):
         idx_info.append(cls_indices)
     return idx_info
     
-def get_dataset(name, path, split_type='public'):
+def get_dataset(name, path, split_type='public',normalize_features=False):
     import torch_geometric.transforms as T
-
+    transform=T.NormalizeFeatures() if normalize_features else None
     if name == "Cora" or name == "CiteSeer" or name == "PubMed":
         from torch_geometric.datasets import Planetoid
-        dataset = Planetoid(path, name, transform=T.NormalizeFeatures(), split=split_type)
+        dataset = Planetoid(path, name, transform=transform, split=split_type)
     elif name == 'Amazon-Computers':
         from torch_geometric.datasets import Amazon
-        return Amazon(root=path, name='computers', transform=T.NormalizeFeatures())
+        return Amazon(root=path, name='computers', transform=transform)
     elif name == 'Amazon-Photo':
         from torch_geometric.datasets import Amazon
-        return Amazon(root=path, name='photo', transform=T.NormalizeFeatures())
+        return Amazon(root=path, name='photo', transform=transform)
     elif name == 'Coauthor-CS':
         from torch_geometric.datasets import Coauthor
-        return Coauthor(root=path, name='cs', transform=T.NormalizeFeatures())
+        return Coauthor(root=path, name='cs', transform=transform)
     elif name == 'Amazon-Products':
         from torch_geometric.datasets import AmazonProducts
-        return AmazonProducts(root=path, transform=T.NormalizeFeatures())
+        return AmazonProducts(root=path, transform=transform)
     elif name == 'Yelp':
         from torch_geometric.datasets import Yelp
-        return Yelp(root=path, transform=T.NormalizeFeatures())
+        return Yelp(root=path, transform=transform)
     else:
         raise NotImplementedError("Not Implemented Dataset!")
 

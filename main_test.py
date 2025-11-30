@@ -215,6 +215,7 @@ reweight = False
 device = args.device
 path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', args.dataset)
 dataset = VNG_utils.get_dataset(args.dataset,path,split_type="full")
+tab_dataset = tab_dataset_util.load_tab_dataset_info(args.dataset, path, split_type='full')
 n_feat=dataset.num_features
 data = dataset[0].to(device)
 print(data)

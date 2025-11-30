@@ -4,10 +4,7 @@ from typing import Optional, Dict, Any
 
 ArrayDict = Dict[str, np.ndarray]
 class TabDataset:
-    X_num: Optional[ArrayDict]
-    X_cat: Optional[ArrayDict]
-    y: ArrayDict
-    int_col_idx_wrt_num: list
-    y_info: Dict[str, Any]
+    num_numerical_features: int # number of numerical features
+    categories: Optional[np.ndarray] # number array of categories for each categorical feature
     n_classes: Optional[int]
-    raw_graph: object
+    graph: object # numerical features will be move to the top of feature matrix
