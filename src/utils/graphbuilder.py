@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from torch_scatter import scatter_add
 
 
 def make_longtailed_data_remove(edge_index, label, n_data, n_cls, ratio, train_mask, max_n=500):

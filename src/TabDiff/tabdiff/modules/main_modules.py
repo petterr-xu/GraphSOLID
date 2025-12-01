@@ -192,8 +192,8 @@ class Model(nn.Module):
         else:
             self.denoise_fn_D = denoise_fn
 
-    def forward(self, x_num, x_cat, t, sigma=None, class_labels=None):
+    def forward(self, x_num, x_cat, t, sigma=None, guidance=None):
         if self.precond:
-            return self.denoise_fn_D(x_num, x_cat, t, sigma, class_labels=class_labels)
+            return self.denoise_fn_D(x_num, x_cat, t, sigma, class_labels=guidance)
         else:
-            return self.denoise_fn_D(x_num, x_cat, t, class_labels=class_labels)
+            return self.denoise_fn_D(x_num, x_cat, t, class_labels=guidance)

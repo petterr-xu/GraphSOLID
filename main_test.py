@@ -122,16 +122,15 @@ def train_tabdiff():
     train_label_data = data.y[data_train_mask]
     eval_feat = data.x[data_val_mask]
     eval_label = data.y[data_val_mask]
-    class_mask = torch.zeros((train_feat_data.shape[0]),dtype=torch.bool,device=device)
-    train_dataset = TensorDataset(train_feat_data,train_label_data,class_mask)
-    data_loader = DataLoader(train_dataset, args.batch_size, shuffle=True)
     loss_value = 0.0
     class_dis = VNG_utils.class_dis(data.y[data_train_mask],n_cls)
     class_dis = class_dis / sum(class_dis)
     class_mask = VNG_utils.dis_based_class_mask(train_label_data,class_dis,n_cls,train_label_data.shape[0],args.guidance_drop_prob,adjustment_factor=args.adjustment_factor,device=device)
+    class_mask = class_mask[:, None].repeat(1,n_cls).to(torch.int32)
+    class_mask = (-1*(1-class_mask))
     # print("{} guidance, hard label of guidance is:".format(sum(class_mask)))
     # print(train_label_data[class_mask].argmax(1))
-    train_dataset.tensors = (train_feat_data, train_label_data, class_mask)
+    train_dataset = TensorDataset(train_feat_data, train_label_data, class_mask)
     data_loader = DataLoader(train_dataset, args.batch_size, shuffle=True)
     for inputs,targets,c_mask in data_loader:
         targets = F.one_hot(targets,num_classes=n_cls)
@@ -154,7 +153,7 @@ def train_tabdiff():
 
 @torch.no_grad()
 def eval_diffusion_model(eval_data):
-    diffusion_model.eval()
+    tab_diffusion.eval()
     with torch.no_grad():
         feat_dataset = TensorDataset(eval_data[0],eval_data[1],eval_data[2])
         test_data_loader = DataLoader(feat_dataset, batch_size=32, shuffle=True)
@@ -239,10 +238,10 @@ device = args.device
 path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', args.dataset)
 tab_dataset = tab_dataset_util.load_tab_dataset_info(args.dataset, path, split_type='full')
 dataset = tab_dataset.graph
-n_feat=dataset.num_features
-data = dataset[0].to(device)
+data = tab_dataset.graph.to(device)
+n_feat = tab_dataset.n_features
 print(data)
-n_cls = data.y.max().item() + 1
+n_cls = tab_dataset.n_labels
 ori_edge_index = data.edge_index
 data = train_test_split_edges(data)
 
@@ -306,99 +305,87 @@ for r in range(repeatition):
         print("minority classes {}".format(minority_class))
         print("number of edges {}".format(sum(train_edge_mask)))
 
-        best_loss = float('inf')
-        patience = 5
-        patience_count = 0
-        patience_beta = 1e-3
-        teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
-        teacher_optimizer = torch.optim.Adam(teacher_model.parameters(), lr=1e-3)
-        with tqdm(total=args.epochs, desc="Teacher Training Progress") as pbar:
-            for e in range(args.epochs):
-                val_loss = train_teacher()
-                if val_loss < (best_loss - patience_beta):
-                    best_loss = val_loss
-                    patience_count = 0
-                else: patience_count += 1
-                pbar.set_postfix({
-                    'Val Loss': f'{val_loss:.4f}', 
-                    'Patience': f'{patience_count}/{patience}'
-                })
-                pbar.update(1)
-                if patience_count >= patience:
-                    pbar.write(f"Early stopping at epoch {e+1}")
-                    pbar.close()
-                    break
+    best_loss = float('inf')
+    patience = 5
+    patience_count = 0
+    patience_beta = 1e-3
+    teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
+    teacher_optimizer = torch.optim.Adam(teacher_model.parameters(), lr=1e-3)
+    with tqdm(total=args.epochs, desc="Teacher Training Progress") as pbar:
+        for e in range(args.epochs):
+            val_loss = train_teacher()
+            if val_loss < (best_loss - patience_beta):
+                best_loss = val_loss
+                patience_count = 0
+            else: patience_count += 1
+            pbar.set_postfix({
+                'Val Loss': f'{val_loss:.4f}', 
+                'Patience': f'{patience_count}/{patience}'
+            })
+            pbar.update(1)
+            if patience_count >= patience:
+                pbar.write(f"Early stopping at epoch {e+1}")
+                pbar.close()
+                break
 
 
 
-        # training process for diffusion model
-        denoise_kwargs = {
-            "d_numerical" : tab_dataset.num_numerical_features, 
-            "categories" : tab_dataset.categories, 
-            "num_layers" : args.denoise_layers, 
-            "d_token" : args.d_token
-        }
+    # training process for diffusion model
+    denoise_kwargs = {
+        "d_numerical" : tab_dataset.num_numerical_features, 
+        "categories" : tab_dataset.categories, 
+        "num_layers" : args.denoise_layers, 
+        "d_token" : args.d_token
+    }
 
-        denoise_backbone = UniModMLP(
-            **denoise_kwargs
-        )
+    denoise_backbone = UniModMLP(
+        **denoise_kwargs
+    )
 
-        # model_kwargs = {}
-        denoise_model = Model(denoise_backbone)
-        denoise_model.to(device)
+    # model_kwargs = {}
+    denoise_model = Model(denoise_backbone)
+    denoise_model.to(device)
 
-        diffusion_kwargs = {}
-        tab_diffusion = UnifiedCtimeDiffusion(
-            num_classes=tab_dataset.categories,
-            num_numerical_features=tab_dataset.num_numerical_features,
-            denoise_fn=denoise_model,
-            y_only_model=None,
-            **diffusion_kwargs,
-            device=device,
-        )
-        num_params = sum(p.numel() for p in tab_diffusion.parameters())
-        print("The number of parameters = ", num_params)
-        tab_diffusion.to(device)
-        tab_diffusion.train()
-        train_tabdiff()
+    diffusion_kwargs = {
+        "noise_dist" : "uniform_t"
+    }
+    tab_diffusion = UnifiedCtimeDiffusion(
+        num_classes=tab_dataset.categories,
+        num_numerical_features=tab_dataset.num_numerical_features,
+        denoise_fn=denoise_model,
+        y_only_model=None,
+        **diffusion_kwargs,
+        device=device,
+    )
+    num_params = sum(p.numel() for p in tab_diffusion.parameters())
+    print("The number of parameters = ", num_params)
+    tab_diffusion.to(device)
+    tab_diffusion.train()
 
-        eps_model = unet.UNet(**denoise_kwargs)
-        # eps_model = unet_vector.UNet(denoise_config)
-        if args.beta_schedule == "lin":
-            beta = torch.linspace(args.beta_bound[0], args.beta_bound[1], args.T)
-        elif args.beta_schedule == "exp":
-            beta_exp = args.beta_bound[0] * (args.beta_bound[1] / args.beta_bound[0]) ** (np.arange(args.T) / args.T)
-            beta = torch.tensor(beta_exp,dtype=torch.float32)
-        elif args.beta_schedule == "quad":
-            beta_quad = args.beta_bound[0] + (np.arange(args.T) / args.T) ** 2 * (args.beta_bound[1] - args.beta_bound[0])
-            beta = torch.tensor(beta_quad,dtype=torch.float32)
-        else:
-            print("NO SUCH BETA SCHEDULE:"+args.beta_schedule)
-            raise Exception
-        diffusion_model = diffusion.GDDPMblock(eps_model,beta,n_steps=args.T,device=device).to(device)
-        dif_optimizer = torch.optim.Adam(diffusion_model.eps_model.parameters(), lr=args.dif_lr)
+    dif_optimizer = torch.optim.Adam(tab_diffusion.parameters(), lr=args.dif_lr)
+    train_tabdiff()
 
-        best_loss = float('inf')
-        patience = 10
-        patience_count = 0
-        patience_beta = 2e-4
-        dif_epoch = 1000
-        with tqdm(total=dif_epoch, desc="Diffusion Training") as pbar:
-            for e in range(dif_epoch):
-                val_loss = train_tabdiff()
-                if val_loss < (best_loss - patience_beta):
-                    best_loss = val_loss
-                    patience_count = 0
-                else: patience_count += 1
-                pbar.set_postfix({
-                    'Val Loss': f'{val_loss:.4f}', 
-                    'Patience': f'{patience_count}/{patience}'
-                })
-                pbar.update(1)
-                if patience_count >= patience:
-                    pbar.write(f"Early stopping at epoch {e+1}")
-                    pbar.close()
-                    break
+    best_loss = float('inf')
+    patience = 10
+    patience_count = 0
+    patience_beta = 2e-4
+    dif_epoch = 1000
+    with tqdm(total=dif_epoch, desc="Diffusion Training") as pbar:
+        for e in range(dif_epoch):
+            val_loss = train_tabdiff()
+            if val_loss < (best_loss - patience_beta):
+                best_loss = val_loss
+                patience_count = 0
+            else: patience_count += 1
+            pbar.set_postfix({
+                'Val Loss': f'{val_loss:.4f}', 
+                'Patience': f'{patience_count}/{patience}'
+            })
+            pbar.update(1)
+            if patience_count >= patience:
+                pbar.write(f"Early stopping at epoch {e+1}")
+                pbar.close()
+                break
 
 
 if repeatition == 1 : exit()

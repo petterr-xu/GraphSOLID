@@ -71,12 +71,13 @@ def load_tab_dataset_info(name, path, split_type='public') -> TabDataset:
     - `split_type`: 图数据集的划分类型，默认为 'public'
     """
     graph_dataset = VNG_utils.get_dataset(name, path, split_type, normalize_features=False)
+    n_feat = graph_dataset.num_features if hasattr(graph_dataset, 'num_features') else None
     graph = _get_graph_from_dataset(graph_dataset)
 
     feat = _get_feature_tensor(graph)
     total_cols = feat.shape[1]
 
-    meta_info = load_meta_info(path)
+    meta_info = load_meta_info(path,name=name)
     num_cols = meta_info.get('num_col_idx', []) or []
     cat_cols = meta_info.get('cat_col_idx', []) or []
 
@@ -101,8 +102,9 @@ def load_tab_dataset_info(name, path, split_type='public') -> TabDataset:
     dataset = TabDataset()
     dataset.num_numerical_features = len(num_cols)
     dataset.categories = categories
-    dataset.n_classes = _infer_n_classes(graph)
+    dataset.n_labels = _infer_n_classes(graph)
     dataset.graph = graph
+    dataset.n_features = n_feat
 
     return dataset
 
