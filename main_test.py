@@ -136,7 +136,6 @@ def train_tabdiff():
         targets = F.one_hot(targets,num_classes=n_cls)
         soft_labels = teacher_model.softmax_with_temperature(inputs,args.temperature)
         targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
-        inputs = torch.unsqueeze(inputs,dim=1)
         # print(inputs.shape)
         dif_optimizer.zero_grad()
         targets = targets.to(device)
@@ -165,7 +164,6 @@ def eval_diffusion_model(eval_data):
             targets = F.one_hot(targets,num_classes=n_cls)
             soft_labels = teacher_model.softmax_with_temperature(inputs,args.temperature)
             targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
-            inputs = torch.unsqueeze(inputs,dim=1)
             targets = targets.to(device)
             # class_mask = (torch.rand(targets.shape[0]) < 0.15).to(device,torch.int32)
             # c_mask = torch.ones_like(c_mask,device=device)
