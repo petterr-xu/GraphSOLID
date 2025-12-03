@@ -141,7 +141,7 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         #  与 “职业（分类）” 的关联），避免两种特征分离处理导致的关联性丢失（论文核心创新之一，）。
         model_out_num, model_out_cat = self._denoise_fn(   
             x_num_t, x_cat_t_soft,
-            t.squeeze(), sigma=sigma_num, guidance = guidance * guidance_mask
+            t.squeeze(), sigma=sigma_num, guidance = guidance * guidance_mask[:, None]
         )
 
         d_loss = torch.zeros((1,)).float()
@@ -256,7 +256,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
             # 步骤1：生成掩码索引（是否对每个类别执行掩码）
             move_indices = torch.rand(
             * x.shape, device=x.device) < move_chance
-            # 步骤2：执行硬掩码：满足掩码条件则转为[MASK]，否则保留原始类别
+            # 步骤2：对分类特征做“硬掩码”。对于每个样本和每个分类维度，当对应的 move_indices 为 True 时，
+            # 将该位置的原始类别索引 x 替换为该维度的 mask 索引 self.mask_index；否则保留原值。
             xt = torch.where(move_indices, self.mask_index, x)
             # 步骤3：将硬掩码结果转为独热向量（xt_soft），适配后续网络输入
             xt_soft = self.to_one_hot(xt).to(move_chance.dtype)

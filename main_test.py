@@ -7,6 +7,7 @@ import numpy as np
 from tqdm import tqdm
 import os.path as osp
 import torch.nn as nn
+from datetime import datetime
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 from torch_geometric.utils import train_test_split_edges,negative_sampling
@@ -231,10 +232,12 @@ def eval_diffusion_model(eval_data):
 args = parse_args()
 print(args)
 reweight = False
+timestamp_format = "%Y%m%d_%H%M%S"
 
 device = args.device
-path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', args.dataset)
-tab_dataset = tab_dataset_util.load_tab_dataset_info(args.dataset, path, split_type='full')
+root_path = osp.dirname(osp.realpath(__file__))
+data_path = osp.join(root_path, 'data', args.dataset)
+tab_dataset = tab_dataset_util.load_tab_dataset_info(args.dataset, data_path, split_type='full')
 dataset = tab_dataset.graph
 data = tab_dataset.graph.to(device)
 n_feat = tab_dataset.n_features
@@ -308,7 +311,7 @@ for r in range(repeatition):
     patience_count = 0
     patience_beta = 1e-3
     teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
-    teacher_optimizer = torch.optim.Adam(teacher_model.parameters(), lr=1e-3)
+    teacher_optimizer = torch.optim.Adam(teacher_model.parameters(), lr=1e-4)
     with tqdm(total=args.epochs, desc="Teacher Training Progress") as pbar:
         for e in range(args.epochs):
             val_loss = train_teacher()
@@ -331,7 +334,7 @@ for r in range(repeatition):
     # training process for diffusion model
     denoise_kwargs = {
         "d_numerical" : tab_dataset.num_numerical_features, 
-        "categories" : tab_dataset.categories, 
+        "categories" : (tab_dataset.categories+1).tolist(), 
         "num_layers" : args.denoise_layers, 
         "d_token" : args.d_token
     }
@@ -361,7 +364,6 @@ for r in range(repeatition):
     tab_diffusion.train()
 
     dif_optimizer = torch.optim.Adam(tab_diffusion.parameters(), lr=args.dif_lr)
-    train_tabdiff()
 
     best_loss = float('inf')
     patience = 10
@@ -377,9 +379,14 @@ for r in range(repeatition):
             else: patience_count += 1
             pbar.set_postfix({
                 'Val Loss': f'{val_loss:.4f}', 
+                'Best Loss': f'{best_loss:.4f}',
                 'Patience': f'{patience_count}/{patience}'
             })
             pbar.update(1)
+            if (e+1) % 10 == 0:
+                ts = datetime.now().strftime(timestamp_format)
+                ckpt_path = osp.join(root_path, "ckpt","tabdiff","tabdiff_" + args.dataset+f"_e{e}_"+ts+".pth")
+                VNG_utils.save(tab_diffusion,ckpt_path)
             if patience_count >= patience:
                 pbar.write(f"Early stopping at epoch {e+1}")
                 pbar.close()
