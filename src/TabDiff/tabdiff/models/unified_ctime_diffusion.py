@@ -216,6 +216,158 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         sample = torch.cat([z_norm, z_cat], dim=1).cpu()
         return sample
     
+    @torch.no_grad()
+    def sampl_cfg(self, num_samples, guidances=None, guidance_scale=1.0):
+        """
+        基于传统CFG的条件采样方法（仅负责调度，去噪由edm_update完成）
+        Args:
+            num_samples: 生成样本数量
+            labels: 条件标签 (num_samples, ...)
+            guidance_scale: 条件引导强度（>=0）
+        """
+        b = num_samples
+        device = self.device
+        dtype = torch.float32
+        
+        # 1. 初始化时间步和噪声参数链
+        t = torch.linspace(0, 1, self.num_timesteps, dtype=dtype, device=device)[:, None]
+        sigma_num_cur = self.num_schedule.total_noise(t)
+        sigma_cat_cur = self.cat_schedule.total_noise(t)
+        sigma_num_next = torch.zeros_like(sigma_num_cur)
+        sigma_num_next[1:] = sigma_num_cur[:-1]
+        sigma_cat_next = torch.zeros_like(sigma_cat_cur)
+        sigma_cat_next[1:] = sigma_cat_cur[:-1]
+        
+        # 2. 准备随机采样的sigma_hat（扰动参数）
+        if self.sampler_params['stochastic_sampler']:
+            gamma = min(S_churn / self.num_timesteps, np.sqrt(2) - 1) * \
+                    (S_min <= sigma_num_cur) * (sigma_num_cur <= S_max)
+            sigma_num_hat = sigma_num_cur + gamma * sigma_num_cur
+            t_hat = self.num_schedule.inverse_to_t(sigma_num_hat)
+            t_hat = torch.min(t_hat, dim=-1, keepdim=True).values
+            zero_gamma = (gamma == 0).any()
+            t_hat[zero_gamma] = t[zero_gamma]
+            out_of_bound = (t_hat > 1).squeeze()
+            sigma_num_hat[out_of_bound] = sigma_num_cur[out_of_bound]
+            t_hat[out_of_bound] = t[out_of_bound]
+            sigma_cat_hat = self.cat_schedule.total_noise(t_hat)
+        else:
+            t_hat = t
+            sigma_num_hat = sigma_num_cur
+            sigma_cat_hat = sigma_cat_cur
+        
+        # 3. 初始化噪声（数值特征+分类特征）
+        z_norm = torch.randn((b, self.num_numerical_features), device=device) * sigma_num_cur[-1]
+        has_cat = len(self.num_classes) > 0
+        z_cat = self._sample_masked_prior(b, len(self.num_classes)) if has_cat else torch.zeros((b, 0), device=device).float()
+        
+        # 5. 循环调用edm_update完成多步去噪（核心调度逻辑）
+        pbar = tqdm(reversed(range(self.num_timesteps)), total=self.num_timesteps)
+        pbar.set_description(f"Sampling (guidance_scale={guidance_scale})")
+        for i in pbar:
+            # 传递当前时间步参数和CFG所需的标签/掩码/引导强度
+            z_norm, z_cat, _ = self.edm_update_cfg(
+                x_num_cur=z_norm,
+                x_cat_cur=z_cat,
+                i=i,
+                t_cur=t[i],
+                t_next=t[i-1] if i > 0 else None,
+                t_hat=t_hat[i],
+                sigma_num_cur=sigma_num_cur[i],
+                sigma_num_next=sigma_num_next[i],
+                sigma_num_hat=sigma_num_hat[i],
+                sigma_cat_cur=sigma_cat_cur[i],
+                sigma_cat_next=sigma_cat_next[i],
+                sigma_cat_hat=sigma_cat_hat[i],
+                # CFG相关参数（新增）
+                guidances=guidances,
+                guidance_scale=guidance_scale
+            )
+        
+        assert torch.all(z_cat < self.mask_index)
+        return torch.cat([z_norm, z_cat], dim=1).cpu()
+    
+
+    def edm_update_cfg(
+        self, x_num_cur, x_cat_cur, i, 
+        t_cur, t_next, t_hat,
+        sigma_num_cur, sigma_num_next, sigma_num_hat, 
+        sigma_cat_cur, sigma_cat_next, sigma_cat_hat,
+        # 新增：CFG相关参数
+        guidances=None,
+        guidance_scale=1.0
+    ):
+        """单步去噪逻辑（集成CFG条件引导）"""
+        b = x_num_cur.shape[0]
+        has_cat = len(self.num_classes) > 0
+        device = self.device
+
+        # 1. 对当前数据进行小幅扰动（t -> t^+）
+        x_num_hat = x_num_cur + (sigma_num_hat **2 - sigma_num_cur** 2).sqrt() * S_noise * torch.randn_like(x_num_cur)
+        move_chance = -torch.expm1(sigma_cat_cur - sigma_cat_hat)
+        x_cat_hat, _ = self.q_xt(x_cat_cur, move_chance) if has_cat else (x_cat_cur, x_cat_cur)
+        x_cat_hat_oh = self.to_one_hot(x_cat_hat).to(x_num_hat.dtype) if has_cat else x_cat_hat
+
+        # 2. CFG核心：条件+无条件双路径预测
+
+        # 准备CFG所需的条件/无条件掩码
+        cond_mask = torch.zeros(b, device=device, dtype=torch.int32)  # 0：使用条件
+        uncond_mask = torch.ones(b, device=device, dtype=torch.int32)  # 1：忽略条件
+        # 2.1 无条件预测（忽略标签）
+        uncond_denoised, uncond_raw_logits = self._denoise_fn(
+            x_num_hat.float(), x_cat_hat_oh,
+            t_hat.squeeze().repeat(b), 
+            sigma=sigma_num_hat.unsqueeze(0).repeat(b, 1),
+            guidance=guidances * uncond_mask[:, None] if guidances is not None else None  # 掩码标签
+        )
+        # 2.2 有条件预测（使用标签）
+        cond_denoised, cond_raw_logits = self._denoise_fn(
+            x_num_hat.float(), x_cat_hat_oh,
+            t_hat.squeeze().repeat(b), 
+            sigma=sigma_num_hat.unsqueeze(0).repeat(b, 1),
+            guidance=guidances * cond_mask[:, None] if guidances is not None else None  # 保留标签
+        )
+        # 2.3 加权组合（传统CFG公式）
+        denoised = uncond_denoised + guidance_scale * (cond_denoised - uncond_denoised)
+        raw_logits = uncond_raw_logits + guidance_scale * (cond_raw_logits - uncond_raw_logits)
+
+        # 3. 原代码中的去噪更新逻辑（保持不变）
+        # 3.1 欧拉法更新数值特征
+        d_cur = (x_num_hat - denoised) / sigma_num_hat
+        x_num_next = x_num_hat + (sigma_num_next - sigma_num_hat) * d_cur
+
+        # 3.2 更新分类特征
+        x_cat_next = x_cat_cur
+        q_xs = torch.zeros_like(x_cat_cur).float()
+        if has_cat:
+            logits = self._subs_parameterization(raw_logits, x_cat_hat)
+            alpha_t = torch.exp(-sigma_cat_hat).unsqueeze(0).repeat(b, 1)
+            alpha_s = torch.exp(-sigma_cat_next).unsqueeze(0).repeat(b, 1)
+            x_cat_next, q_xs = self._mdlm_update(logits, x_cat_hat, alpha_t, alpha_s)
+
+        # 3.3 二阶校正（保持不变）
+        if self.sampler_params['second_order_correction'] and i > 0:
+            x_cat_hat_oh = self.to_one_hot(x_cat_hat).to(x_num_next.dtype) if has_cat else x_cat_hat
+            # 二阶校正同样需要CFG组合
+            uncond_denoised2, uncond_raw_logits2 = self._denoise_fn(
+                x_num_next.float(), x_cat_hat_oh,
+                t_next.squeeze().repeat(b), 
+                sigma=sigma_num_next.unsqueeze(0).repeat(b, 1),
+                guidance=guidances * uncond_mask[:, None] if guidances is not None else None
+            )
+            cond_denoised2, cond_raw_logits2 = self._denoise_fn(
+                x_num_next.float(), x_cat_hat_oh,
+                t_next.squeeze().repeat(b), 
+                sigma=sigma_num_next.unsqueeze(0).repeat(b, 1),
+                guidance=guidances * cond_mask[:, None] if guidances is not None else None
+            )
+            denoised2 = uncond_denoised2 + guidance_scale * (cond_denoised2 - uncond_denoised2)
+            
+            d_prime = (x_num_next - denoised2) / sigma_num_next
+            x_num_next = x_num_hat + (sigma_num_next - sigma_num_hat) * (0.5 * d_cur + 0.5 * d_prime)
+
+        return x_num_next, x_cat_next, q_xs
+    
     def sample_all(self, num_samples, batch_size, keep_nan_samples=False):        
         b = batch_size
 
@@ -436,7 +588,9 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         x_cat_hat, _ = self.q_xt(x_cat_cur, move_chance) if has_cat else (x_cat_cur, x_cat_cur)
 
         # Get predictions
+        # 分类数据转为独热向量
         x_cat_hat_oh = self.to_one_hot(x_cat_hat).to(x_num_hat.dtype) if has_cat else x_cat_hat
+        # 去噪网络预测原始数据
         denoised, raw_logits = self._denoise_fn(
             x_num_hat.float(), x_cat_hat_oh,
             t_hat.squeeze().repeat(b), sigma=sigma_num_hat.unsqueeze(0).repeat(b,1)  # sigma accepts (bs, K_num)
@@ -456,18 +610,19 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
             y_num_hat = x_num_hat.float()[:, self.num_mask_idx]
             idx = list(chain(*[self.slices_for_classes_with_mask[i] for i in self.cat_mask_idx]))
             y_cat_hat = x_cat_hat_oh[:,idx]
+            # 调用无条件模型（y_only_model）预测缺失特征分布
             y_only_denoised, y_only_raw_logits = self.y_only_model(
                 y_num_hat, 
                 y_cat_hat,
                 t_hat.squeeze().repeat(b), sigma=sigma_cond.unsqueeze(0).repeat(b,1)  # sigma accepts (bs, K_num)
             )
-            
+             # 融合条件模型与无条件模型结果（数值特征）
             denoised[:, self.num_mask_idx] *= 1 + self.w_num
             denoised[:, self.num_mask_idx] -= self.w_num*y_only_denoised
             
             mask_logit_idx = [self.slices_for_classes_with_mask[i] for i in self.cat_mask_idx]
             mask_logit_idx = np.concatenate(mask_logit_idx) if len(mask_logit_idx)>0 else np.array([])
-            
+            # 融合条件模型与无条件模型结果（分类特征）
             raw_logits[:, mask_logit_idx] *= 1 + self.w_cat
             raw_logits[:, mask_logit_idx] -= self.w_cat*y_only_raw_logits
         
@@ -515,7 +670,9 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
                 x_num_next = x_num_hat + (sigma_num_next - sigma_num_hat) * (0.5 * d_cur + 0.5 * d_prime)
         
         return x_num_next, x_cat_next, q_xs
-
+    
+    def cfg_sample_impute():
+        pass
 
     def sample_impute(self, x_num, x_cat, num_mask_idx, cat_mask_idx, resample_rounds, impute_condition, w_num, w_cat):
         self.w_num = w_num
@@ -538,6 +695,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         t = t[:, None]
         
         # Compute the chains of sigma
+        # sigma_num_cur/sigma_cat_cur：当前时间步 t 对应的数值 / 分类特征的噪声强度（扩散过程的核心参数，控制噪声大小）。
+        # sigma_num_next/sigma_cat_next：下一时间步 t-1 的噪声强度（通过移位当前噪声强度实现，最后一步为 0）
         sigma_num_cur = self.num_schedule.total_noise(t)
         sigma_cat_cur = self.cat_schedule.total_noise(t)
         sigma_num_next = torch.zeros_like(sigma_num_cur)

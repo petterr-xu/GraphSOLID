@@ -259,11 +259,15 @@ def main(args):
     )
     if args.mode == 'test':
         if args.report:
+            # 批量生成多个合成样本并计算评估指标的平均值和标准差。
             if  is_dcr:
+                # 若数据集名称包含 dcr（如 adult_dcr），则调用 trainer.report_test_dcr(args.num_runs)，专门评估隐私指标 DCR 分数。
                 trainer.report_test_dcr(args.num_runs)
             else:
+                # 否则调用 trainer.report_test(args.num_runs)，评估常规指标（如密度、MLE、C2ST 等），默认生成 20 个样本（可通过 --num_runs 调整）。
                 trainer.report_test(args.num_runs)
         elif args.impute:
+            # 执行缺失值填充任务，调用 trainer.test_impute(...)，基于预训练的引导模型（--y_only 训练的模型）对目标列进行填充
             imputed_sample_save_dir = f"impute/{dataname}/{exp_name}"
             trainer.test_impute(
                 args.trial_start, args.trial_size, 
@@ -274,6 +278,7 @@ def main(args):
                 args.w_cat,
             )
         else:
+            # 单次生成合成数据，调用 trainer.test()，生成样本数量由配置文件或 --num_samples_to_generate 参数指定。
             trainer.test()
     else:
         ## Save config
