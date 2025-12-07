@@ -392,6 +392,18 @@ for r in range(repeatition):
                 pbar.close()
                 break
 
+    v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],
+                                                        data.y[data_train_mask],
+                                                        n_cls,
+                                                        diffusion_model = tab_diffusion,
+                                                        teacher_model = teacher_model,
+                                                        temperature = args.temperature,
+                                                        guidance_scale = args.guidance,
+                                                        hard_factor = args.hard_factor,
+                                                        aug_mode = args.aug_mode,
+                                                        is_hard_sample = (args.hard_factor == 1.),
+                                                        is_beta_sampling = False)
+
 
 if repeatition == 1 : exit()
 # ## Calculate statistics ##
