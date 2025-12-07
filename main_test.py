@@ -385,7 +385,7 @@ for r in range(repeatition):
             pbar.update(1)
             if (e+1) % 10 == 0:
                 ts = datetime.now().strftime(timestamp_format)
-                ckpt_path = osp.join(root_path, "ckpt","tabdiff","tabdiff_" + args.dataset+f"_e{e}_"+ts+".pth")
+                ckpt_path = osp.join(root_path, "ckpt","tabdiff","tabdiff_" + args.dataset+"_"+ts+f"_e{e}_"+".pth")
                 VNG_utils.save(tab_diffusion,ckpt_path)
             if patience_count >= patience:
                 pbar.write(f"Early stopping at epoch {e+1}")
@@ -396,7 +396,7 @@ for r in range(repeatition):
                                                         data.y[data_train_mask],
                                                         n_cls,
                                                         diffusion_model = tab_diffusion,
-                                                        teacher_model = teacher_model,
+                                                        teacher = teacher_model,
                                                         temperature = args.temperature,
                                                         guidance_scale = args.guidance,
                                                         hard_factor = args.hard_factor,

@@ -69,13 +69,13 @@ def softlabel_based_hard_nodes_tab_sampling(x:torch.tensor,y,n_cls,diffusion_mod
         overall_guidance = confidence_guidance * (1-hard_factor) + F.one_hot(node_classes,n_cls) * hard_factor
         x_t = torch.randn([class_aug_size,1,n_emb]).to(device)
         if class_aug_size < MAX_SAMPLING_SIZE:
-            x0_v,_ = diffusion_model.sampl_cfg(num_samples = class_aug_size, guidance = overall_guidance, guidance_scale=guidance_scale)
+            x0_v,_ = diffusion_model.sampl_cfg(num_samples = class_aug_size, guidances = overall_guidance, guidance_scale=guidance_scale)
         else:
             x0_v = []
             for step in range(0,class_aug_size // MAX_SAMPLING_SIZE+1):
                 begin = step * MAX_SAMPLING_SIZE
                 end = (step + 1) * MAX_SAMPLING_SIZE if (step + 1) * MAX_SAMPLING_SIZE < class_aug_size else class_aug_size
-                x0_b,_ = diffusion_model.sampl_cfg(num_samples = end - begin, guidance = overall_guidance[begin:end], guidance_scale=guidance_scale)
+                x0_b,_ = diffusion_model.sampl_cfg(num_samples = end - begin, guidances = overall_guidance[begin:end], guidance_scale=guidance_scale)
                 x0_v.append(x0_b)
             x0_v = torch.cat(x0_v, dim=0)
             
