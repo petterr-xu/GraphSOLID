@@ -1,6 +1,7 @@
 import torch.nn.functional as F
 import torch
 import math
+import time
 import numpy as np
 from .noise_schedule import *
 from tqdm import tqdm
@@ -266,6 +267,7 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         pbar.set_description(f"Sampling (guidance_scale={guidance_scale})")
         for i in pbar:
             # 传递当前时间步参数和CFG所需的标签/掩码/引导强度
+            emd_start = time.time()
             z_norm, z_cat, _ = self.edm_update_cfg(
                 x_num_cur=z_norm,
                 x_cat_cur=z_cat,
@@ -283,6 +285,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
                 guidances=guidances,
                 guidance_scale=guidance_scale
             )
+            emd_end = time.time()
+            print(f"EDM时间: {emd_end - emd_start:.2f} 秒")
         
         assert torch.all(z_cat < self.mask_index)
         return torch.cat([z_norm, z_cat], dim=1).cpu()
@@ -314,6 +318,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         cond_mask = torch.zeros(b, device=device, dtype=torch.int32)  # 0：使用条件
         uncond_mask = torch.ones(b, device=device, dtype=torch.int32)  # 1：忽略条件
         # 2.1 无条件预测（忽略标签）
+
+        sample_start = time.time()
         uncond_denoised, uncond_raw_logits = self._denoise_fn(
             x_num_hat.float(), x_cat_hat_oh,
             t_hat.squeeze().repeat(b), 
@@ -327,6 +333,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
             sigma=sigma_num_hat.unsqueeze(0).repeat(b, 1),
             guidance=guidances * cond_mask[:, None] if guidances is not None else None  # 保留标签
         )
+        sample_end = time.time()
+        print(f"采样时间: {sample_end - sample_start:.2f} 秒")
         # 2.3 加权组合（传统CFG公式）
         denoised = uncond_denoised + guidance_scale * (cond_denoised - uncond_denoised)
         raw_logits = uncond_raw_logits + guidance_scale * (cond_raw_logits - uncond_raw_logits)
@@ -340,10 +348,16 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         x_cat_next = x_cat_cur
         q_xs = torch.zeros_like(x_cat_cur).float()
         if has_cat:
+            param_start = time.time()
             logits = self._subs_parameterization(raw_logits, x_cat_hat)
+            param_end = time.time()
+            print(f"param时间: {param_end - param_start:.2f} 秒")
             alpha_t = torch.exp(-sigma_cat_hat).unsqueeze(0).repeat(b, 1)
             alpha_s = torch.exp(-sigma_cat_next).unsqueeze(0).repeat(b, 1)
+            mdlm_start = time.time()
             x_cat_next, q_xs = self._mdlm_update(logits, x_cat_hat, alpha_t, alpha_s)
+            mdlm_end = time.time()
+            print(f"mdlm时间: {mdlm_end - mdlm_start:.2f} 秒")
 
         # 3.3 二阶校正（保持不变）
         if self.sampler_params['second_order_correction'] and i > 0:

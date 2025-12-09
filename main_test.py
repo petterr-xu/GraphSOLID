@@ -385,7 +385,7 @@ for r in range(repeatition):
             pbar.update(1)
             if (e+1) % 10 == 0:
                 ts = datetime.now().strftime(timestamp_format)
-                ckpt_path = osp.join(root_path, "ckpt","tabdiff","tabdiff_" + args.dataset+"_"+ts+f"_e{e}_"+".pth")
+                ckpt_path = osp.join(root_path, "ckpt","tabdiff",args.dataset,"tabdiff_" + args.dataset+"_"+ts+f"_e{e}_"+".pth")
                 VNG_utils.save(tab_diffusion,ckpt_path)
             if patience_count >= patience:
                 pbar.write(f"Early stopping at epoch {e+1}")
