@@ -348,6 +348,7 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         x_cat_next = x_cat_cur
         q_xs = torch.zeros_like(x_cat_cur).float()
         if has_cat:
+            torch.cuda.synchronize()
             param_start = time.time()
             logits = self._subs_parameterization(raw_logits, x_cat_hat)
             param_end = time.time()
@@ -545,9 +546,19 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         q_xs[:, range(q_xs.shape[1]), self.mask_index] = move_chance_s[:, :, 0]
         
         # Important: make sure that prob of dummy classes are exactly 0
-        dummy_mask = torch.tensor([[(1 if i <= mask_idx else 0) for i in range(max(self.mask_index+1))] for mask_idx in self.mask_index], device=q_xs.device)
-        dummy_mask = torch.ones_like(q_xs) * dummy_mask
-        q_xs *= dummy_mask
+
+        torch.cuda.synchronize()
+        start_time = time.time()
+        # dummy_mask = torch.tensor([[(1 if i <= mask_idx else 0) for i in range(max(self.mask_index+1))] for mask_idx in self.mask_index], device=q_xs.device)
+        # dummy_mask = torch.ones_like(q_xs) * dummy_mask
+        # q_xs *= dummy_mask
+        idx = torch.arange(q_xs.size(-1), device=q_xs.device)   # (max_K,)
+        valid_mask = idx < self.mask_index[:, None]             # (bs, max_K)
+        valid_mask = valid_mask.unsqueeze(1)                    # (bs, 1, max_K)
+
+        q_xs = q_xs * valid_mask
+        end_time = time.time()
+        print(f"Dummy mask 时间: {end_time - start_time:.2f} 秒")
         
         _x = self._sample_categorical(q_xs)
 

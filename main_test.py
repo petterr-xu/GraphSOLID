@@ -366,7 +366,7 @@ for r in range(repeatition):
     dif_optimizer = torch.optim.Adam(tab_diffusion.parameters(), lr=args.dif_lr)
 
     best_loss = float('inf')
-    patience = 10
+    patience = 5
     patience_count = 0
     patience_beta = 2e-4
     dif_epoch = 1000
