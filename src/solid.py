@@ -10,7 +10,6 @@ MAX_SAMPLING_SIZE = 500
 @torch.no_grad()
 def softlabel_based_hard_nodes_tab_sampling(x:torch.tensor,y,n_cls,diffusion_model,teacher,temperature,guidance_scale=1.0, hard_factor = 0.5, aug_mode = "ratio", over_sample_rate = 1, is_hard_sample = True, is_beta_sampling = True,device="cuda:0"):
     dis = VNG_utils.class_dis(y,n_cls)
-    torch.cuda.synchronize()
     x = x.to(device)
     n_emb = x.shape[1]
     soft_labels = teacher.softmax_with_temperature(x,temperature)

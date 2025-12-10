@@ -354,6 +354,7 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
             print(f"param时间: {param_end - param_start:.2f} 秒")
             alpha_t = torch.exp(-sigma_cat_hat).unsqueeze(0).repeat(b, 1)
             alpha_s = torch.exp(-sigma_cat_next).unsqueeze(0).repeat(b, 1)
+            torch.cuda.synchronize()
             mdlm_start = time.time()
             x_cat_next, q_xs = self._mdlm_update(logits, x_cat_hat, alpha_t, alpha_s)
             mdlm_end = time.time()
