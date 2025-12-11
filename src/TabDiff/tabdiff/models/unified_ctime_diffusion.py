@@ -267,7 +267,6 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         pbar.set_description(f"Sampling (guidance_scale={guidance_scale})")
         for i in pbar:
             # 传递当前时间步参数和CFG所需的标签/掩码/引导强度
-            emd_start = time.time()
             z_norm, z_cat, _ = self.edm_update_cfg(
                 x_num_cur=z_norm,
                 x_cat_cur=z_cat,
@@ -285,8 +284,6 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
                 guidances=guidances,
                 guidance_scale=guidance_scale
             )
-            emd_end = time.time()
-            print(f"EDM时间: {emd_end - emd_start:.2f} 秒")
         
         assert torch.all(z_cat < self.mask_index)
         return torch.cat([z_norm, z_cat], dim=1).cpu()
@@ -348,18 +345,10 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         x_cat_next = x_cat_cur
         q_xs = torch.zeros_like(x_cat_cur).float()
         if has_cat:
-            torch.cuda.synchronize()
-            param_start = time.time()
             logits = self._subs_parameterization(raw_logits, x_cat_hat)
-            param_end = time.time()
-            print(f"param时间: {param_end - param_start:.2f} 秒")
             alpha_t = torch.exp(-sigma_cat_hat).unsqueeze(0).repeat(b, 1)
             alpha_s = torch.exp(-sigma_cat_next).unsqueeze(0).repeat(b, 1)
-            torch.cuda.synchronize()
-            mdlm_start = time.time()
             x_cat_next, q_xs = self._mdlm_update(logits, x_cat_hat, alpha_t, alpha_s)
-            mdlm_end = time.time()
-            print(f"mdlm时间: {mdlm_end - mdlm_start:.2f} 秒")
 
         # 3.3 二阶校正（保持不变）
         if self.sampler_params['second_order_correction'] and i > 0:
@@ -547,19 +536,25 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         
         # Important: make sure that prob of dummy classes are exactly 0
 
-        torch.cuda.synchronize()
-        start_time = time.time()
         # dummy_mask = torch.tensor([[(1 if i <= mask_idx else 0) for i in range(max(self.mask_index+1))] for mask_idx in self.mask_index], device=q_xs.device)
         # dummy_mask = torch.ones_like(q_xs) * dummy_mask
         # q_xs *= dummy_mask
-        idx = torch.arange(q_xs.size(-1), device=q_xs.device)   # (max_K,)
-        valid_mask = idx < self.mask_index[:, None]             # (bs, max_K)
-        valid_mask = valid_mask.unsqueeze(1)                    # (bs, 1, max_K)
 
+        bs, K, C = q_xs.shape # q_xs: (bs, K, C)
+
+        # self.mask_index: (K,)  每个 feature 的有效类别数
+        # 构造类别索引 0..C-1
+        cls_idx = torch.arange(C, device=q_xs.device).unsqueeze(0)   # (1, C)
+
+        # 比较得到 (K, C)
+        valid_mask = cls_idx < self.mask_index.unsqueeze(1)          # (K, C)
+
+        # 扩展 batch 维度 -> (1, K, C) ，广播到 (bs, K, C)
+        valid_mask = valid_mask.unsqueeze(0)                         # (1, K, C)
+
+        # 方法 A：直接乘（把非法项设为 0）
         q_xs = q_xs * valid_mask
-        end_time = time.time()
-        print(f"Dummy mask 时间: {end_time - start_time:.2f} 秒")
-        
+
         _x = self._sample_categorical(q_xs)
 
         copy_flag = (x != self.mask_index).to(x.dtype)
