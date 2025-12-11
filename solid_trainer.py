@@ -28,23 +28,43 @@ import src.utils.graphbuilder
 timestamp_format = "%Y%m%d_%H%M%S"
 root_path = osp.dirname(osp.realpath(__file__))
 class SolidTrainer:
-    def __init__(self, tabgraph:TabDataset, data_train_mask, data_val_mask, diffusion,teacher:nn.Module, edge_learner:nn.Module, classifier:nn.Module,
+    def __init__(self, tabgraph:TabDataset, data_train_mask, data_val_mask, diffusion:nn.Module,teacher:nn.Module, edge_learner:nn.Module, classifier:nn.Module,
                   diff_lr=1e-4,tearch_lr=1e-3,el_lr=1e-3, cl_lr=1e-3, diff_bs = 64, device='cuda:0'):
         self.tabgraph = tabgraph
+        self.aug_data = None
         self.data_train_mask = data_train_mask
         self.data_val_mask = data_val_mask
-        self.diff_bs = diff_bs
+        self.data_train_mask_aug = None
+        self.data_val_mask_aug = None
+        self.edge_index_aug = None
+        self.train_edge_mask_aug = None
+
 
         self.diffusion = diffusion
+        self.diff_bs = diff_bs
         self.teacher = teacher
-        self.edge_learner = edge_learner
+        self.decoder = edge_learner
         self.classifier = classifier
         self.data = tabgraph.graph.to(device)
         self.device = device
 
         self.teacher_optimizer = torch.optim.Adam(self.teacher.parameters(), lr=tearch_lr)
-
         self.dif_optimizer = torch.optim.Adam(self.diffusion.parameters(), lr=diff_lr)
+        self.de_optimizer = torch.optim.Adam(self.decoder.parameters(), lr=el_lr)
+        self.de_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.de_optimizer, mode='min',
+                                                                factor = 0.8,
+                                                                patience = 100,
+                                                                verbose=False)
+        
+        self.classifier_criterion = loss_fn.CrossEntropy().to(device)
+        self.classifier_optimizer = torch.optim.Adam([
+            dict(params=self.classifier.reg_params, weight_decay=5e-4),
+            dict(params=self.classifier.non_reg_params, weight_decay=0),], lr=cl_lr.lr)
+        self.cl_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.classifier_optimizer, mode='min',
+                                                                factor = 0.5,
+                                                                patience = 100,
+                                                                verbose=False)
+
     
     def train_teacher_oneloop(self):
         teacher_model = self.teacher
@@ -172,10 +192,67 @@ class SolidTrainer:
                     break
     
     def train_edge_learner_oneloop(self):
+        device = self.device
+        decoder = self.decoder
+        decoder.train()
+        neg_edge_index = negative_sampling(
+            edge_index=self.data.train_pos_edge_index,
+            num_nodes=self.data.num_nodes,
+            num_neg_samples=self.data.train_pos_edge_index.size(1))
+        edge_labels = torch.cat([torch.ones(self.data.train_pos_edge_index.size(1)), torch.zeros(neg_edge_index.size(1))]).to(device)
+        self.de_optimizer.zero_grad()
+        pos_edge_scores = decoder(self.data.x,self.data.train_pos_edge_index)
+        neg_edge_scores = decoder(self.data.x, neg_edge_index)
+        edge_scores = torch.cat([pos_edge_scores,neg_edge_scores],dim=0)
+        de_loss = F.binary_cross_entropy_with_logits(edge_scores, edge_labels)
+        de_loss.backward()
+        # for param in centloss_criterion.parameters():
+        #     param.grad.data *= (1./args.w_con_loss)
+        with torch.no_grad():
+            decoder.eval()
+            val_pos_edge_scores = decoder(self.data.x, self.data.val_pos_edge_index)
+            val_neg_edge_scores = decoder(self.data.x, self.data.val_neg_edge_index.to(device))
+            val_edge_scores = torch.cat([val_pos_edge_scores,val_neg_edge_scores],dim=0)
+            val_edge_labels = torch.cat([torch.ones(self.data.val_pos_edge_index.size(1)), torch.zeros(self.data.val_neg_edge_index.size(1))]).to(device)
+            val_recon_loss = F.binary_cross_entropy_with_logits(val_edge_scores, val_edge_labels)
+        self.de_scheduler.step(val_recon_loss)
+        return val_recon_loss
+
+    def train_edge_learner(self, epochs = 2000):
+        best_loss = float('inf')
+        patience = 20
+        patience_count = 0
+        patience_beta = 1e-3
+        with tqdm(total=epochs, desc="Pre-train") as pbar:
+            for e in range(epochs):
+                val_loss = self.train_edge_learner_oneloop()
+                if val_loss < (best_loss - patience_beta):
+                    best_loss = val_loss
+                    patience_count = 0
+                else: patience_count += 1
+                pbar.set_postfix({
+                    'Val Loss': f'{val_loss:.4f}', 
+                    'Patience': f'{patience_count}/{patience}'
+                })
+                pbar.update(1)
+                if patience_count >= patience:
+                    pbar.write(f"Early stopping at epoch {e+1}")
+                    pbar.close()
+                    break
+
+    def train_classifier_centloss(self):
+        
         pass
 
-    def train_edge_learner(self):
-        pass
+    def train_classifier_vanilla(self, weights=None):
+        self.classifier.train()
+        self.classifier_optimizer.zero_grad()
+        output = self.classifier(self.aug_data.x, self.edge_index_aug[:,self.train_edge_mask_aug], None)
+        self.classifier_criterion(output[self.data_train_mask_aug], self.aug_data.y[self.data_train_mask_aug], weight=weights).backward()
+        with torch.no_grad():
+            self.classifier.eval()
+            output = self.classifier(self.aug_data.x, self.edge_index_aug[:,self.train_edge_mask_aug], None)
+            val_loss= F.cross_entropy(output[self.data_val_mask_aug], self.aug_data.y[self.data_val_mask_aug])
 
-    def train_classifier(self):
-        pass
+        self.classifier_optimizer.step()
+        self.cl_scheduler.step(val_loss)

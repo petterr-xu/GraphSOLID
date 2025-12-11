@@ -241,7 +241,7 @@ for r in range(repeatition):
 
     teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
 
-    # definition for diffusion model
+    # definition of diffusion model
     denoise_kwargs = {
         "d_numerical" : tab_dataset.num_numerical_features, 
         "categories" : (tab_dataset.categories+1).tolist(), 
@@ -279,8 +279,24 @@ for r in range(repeatition):
         "diff_bs" : args.batch_size,
         "device" : device
     }
-    trainer = SolidTrainer(tab_dataset, data_train_mask, data_val_mask, tab_diffusion, teacher_model, None, None,**train_args)
+
+    # definition of edge learner
+    edge_decoder = edge_learner.EdgePredicter(n_feat).to(device)
+
+    # definition of gnn classifier
+    classifier = gnn.GNN_classifier(args.net, n_feat, args.n_hid, n_cls, args.n_layers, dropout=0.5)
+
+    trainer = SolidTrainer(tab_dataset, 
+                           data_train_mask, 
+                           data_val_mask, 
+                           tab_diffusion, 
+                           teacher_model, 
+                           edge_decoder, 
+                           classifier, 
+                           **train_args)
+    
     trainer.train_teacher(epochs=args.epochs)
+    trainer.train_edge_learner()
     trainer.train_diffusion(args)
 
     v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],
@@ -294,7 +310,7 @@ for r in range(repeatition):
                                                         aug_mode = args.aug_mode,
                                                         is_hard_sample = (args.hard_factor == 1.),
                                                         is_beta_sampling = False)
-
+    
 
 if repeatition == 1 : exit()
 # ## Calculate statistics ##
