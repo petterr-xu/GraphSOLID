@@ -252,8 +252,6 @@ for r in range(repeatition):
     denoise_backbone = UniModMLP(
         **denoise_kwargs
     )
-
-    # model_kwargs = {}
     denoise_model = Model(denoise_backbone)
     denoise_model.to(device)
 
@@ -278,7 +276,7 @@ for r in range(repeatition):
         "tearch_lr" : 1e-3,
         "el_lr" : 1e-3,
         "cl_lr" : 1e-3, 
-        "diff_bs" : 64,
+        "diff_bs" : args.batch_size,
         "device" : device
     }
     trainer = SolidTrainer(tab_dataset, data_train_mask, data_val_mask, tab_diffusion, teacher_model, None, None,**train_args)

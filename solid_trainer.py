@@ -104,7 +104,7 @@ class SolidTrainer:
         data_loader = DataLoader(train_dataset, self.diff_bs, shuffle=True)
         for inputs,targets,c_mask in data_loader:
             targets = F.one_hot(targets,num_classes=n_cls)
-            soft_labels = self.teacher_model.softmax_with_temperature(inputs,args.temperature)
+            soft_labels = self.teacher.softmax_with_temperature(inputs,args.temperature)
             targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
             # print(inputs.shape)
             self.dif_optimizer.zero_grad()
@@ -133,7 +133,7 @@ class SolidTrainer:
             for inputs,targets,c_mask in test_data_loader:
                 inputs = inputs.to(device)
                 targets = F.one_hot(targets,num_classes=n_cls)
-                soft_labels = self.teacher_model.softmax_with_temperature(inputs,args.temperature)
+                soft_labels = self.teacher.softmax_with_temperature(inputs,args.temperature)
                 targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
                 targets = targets.to(device)
                 # class_mask = (torch.rand(targets.shape[0]) < 0.15).to(device,torch.int32)
@@ -151,7 +151,7 @@ class SolidTrainer:
         dif_epoch = 1000
         with tqdm(total=dif_epoch, desc="Diffusion Training") as pbar:
             for e in range(dif_epoch):
-                val_loss = self.train_tabdiff_oneloop()
+                val_loss = self.train_tabdiff_oneloop(args)
                 if val_loss < (best_loss - patience_beta):
                     best_loss = val_loss
                     patience_count = 0
@@ -170,3 +170,12 @@ class SolidTrainer:
                     pbar.write(f"Early stopping at epoch {e+1}")
                     pbar.close()
                     break
+    
+    def train_edge_learner_oneloop(self):
+        pass
+
+    def train_edge_learner(self):
+        pass
+
+    def train_classifier(self):
+        pass
