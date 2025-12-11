@@ -316,7 +316,6 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         uncond_mask = torch.ones(b, device=device, dtype=torch.int32)  # 1：忽略条件
         # 2.1 无条件预测（忽略标签）
 
-        sample_start = time.time()
         uncond_denoised, uncond_raw_logits = self._denoise_fn(
             x_num_hat.float(), x_cat_hat_oh,
             t_hat.squeeze().repeat(b), 
@@ -330,8 +329,6 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
             sigma=sigma_num_hat.unsqueeze(0).repeat(b, 1),
             guidance=guidances * cond_mask[:, None] if guidances is not None else None  # 保留标签
         )
-        sample_end = time.time()
-        print(f"采样时间: {sample_end - sample_start:.2f} 秒")
         # 2.3 加权组合（传统CFG公式）
         denoised = uncond_denoised + guidance_scale * (cond_denoised - uncond_denoised)
         raw_logits = uncond_raw_logits + guidance_scale * (cond_raw_logits - uncond_raw_logits)

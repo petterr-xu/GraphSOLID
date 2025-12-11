@@ -13,6 +13,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from torch_geometric.utils import train_test_split_edges,negative_sampling
 from sklearn.metrics import balanced_accuracy_score, f1_score,classification_report,roc_auc_score, accuracy_score, recall_score
 
+from solid_trainer import SolidTrainer
 from args import parse_args
 from src import solid,loss_fn
 from src.utils import VNG_utils,tab_dataset_util
@@ -66,20 +67,6 @@ warnings.filterwarnings("ignore")
 #     de_scheduler.step(val_recon_loss)
 #     return val_loss,val_cent_loss, val_recon_loss
 
-def train_teacher():
-    teacher_model.train()
-    teacher_optimizer.zero_grad()
-    inputs = data.x.to(device)
-    logits = teacher_model(inputs[data_train_mask])
-    loss = F.cross_entropy(logits,data.y[data_train_mask])
-    loss.backward()
-    teacher_optimizer.step()
-    with torch.no_grad():
-        teacher_model.eval()
-        logits = teacher_model(inputs[data_val_mask])
-        val_loss = F.cross_entropy(logits,data.y[data_val_mask])
-    return val_loss
-
 # def train_diffusion_model():
 #     train_feat_data = emb_data.x[data_train_mask]
 #     train_label_data = emb_data.y[data_train_mask]
@@ -117,61 +104,6 @@ def train_teacher():
 #     eval_data = [eval_feat,eval_label,val_class_mask.to(torch.int32)]
 #     val_loss = eval_diffusion_model(eval_data)
 #     return val_loss
-
-def train_tabdiff():
-    train_feat_data = data.x[data_train_mask]
-    train_label_data = data.y[data_train_mask]
-    eval_feat = data.x[data_val_mask]
-    eval_label = data.y[data_val_mask]
-    loss_value = 0.0
-    class_dis = VNG_utils.class_dis(data.y[data_train_mask],n_cls)
-    class_dis = class_dis / sum(class_dis)
-    class_mask = VNG_utils.dis_based_class_mask(train_label_data,class_dis,n_cls,train_label_data.shape[0],args.guidance_drop_prob,adjustment_factor=args.adjustment_factor,device=device)
-    class_mask = class_mask[:, None].repeat(1,n_cls).to(torch.int32)
-    class_mask = (-1*(1-class_mask))
-    # print("{} guidance, hard label of guidance is:".format(sum(class_mask)))
-    # print(train_label_data[class_mask].argmax(1))
-    train_dataset = TensorDataset(train_feat_data, train_label_data, class_mask)
-    data_loader = DataLoader(train_dataset, args.batch_size, shuffle=True)
-    for inputs,targets,c_mask in data_loader:
-        targets = F.one_hot(targets,num_classes=n_cls)
-        soft_labels = teacher_model.softmax_with_temperature(inputs,args.temperature)
-        targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
-        # print(inputs.shape)
-        dif_optimizer.zero_grad()
-        targets = targets.to(device)
-        # 按照一定的概率将guidance置空，由此只用一个backbone训练出适用于两种情况（有无条件）的模型
-        dloss, closs = tab_diffusion.mixed_loss(inputs,targets,c_mask.to(torch.int32))
-        loss = args.dloss_weight * dloss + args.closs_weight * closs
-        loss.backward()
-        dif_optimizer.step()
-        loss_value += loss.item()
-    val_class_mask = VNG_utils.dis_based_class_mask(eval_label,class_dis,n_cls,eval_label.shape[0],args.guidance_drop_prob,adjustment_factor=args.adjustment_factor,device=device)
-    eval_data = [eval_feat,eval_label,val_class_mask.to(torch.int32)]
-    val_loss = eval_diffusion_model(eval_data)
-    return val_loss
-
-@torch.no_grad()
-def eval_diffusion_model(eval_data):
-    tab_diffusion.eval()
-    with torch.no_grad():
-        feat_dataset = TensorDataset(eval_data[0],eval_data[1],eval_data[2])
-        test_data_loader = DataLoader(feat_dataset, batch_size=32, shuffle=True)
-        data_size = len(test_data_loader.dataset)
-        loss_value = 0.0
-        for inputs,targets,c_mask in test_data_loader:
-            # 对节点特征进行padding以避免unet下采样中出现奇数纬度导致分辨率不匹配
-            inputs = inputs.to(device)
-            targets = F.one_hot(targets,num_classes=n_cls)
-            soft_labels = teacher_model.softmax_with_temperature(inputs,args.temperature)
-            targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
-            targets = targets.to(device)
-            # class_mask = (torch.rand(targets.shape[0]) < 0.15).to(device,torch.int32)
-            # c_mask = torch.ones_like(c_mask,device=device)
-            dloss, closs = tab_diffusion.mixed_loss(inputs,targets,c_mask.to(torch.int32))
-            loss = args.dloss_weight * dloss + args.closs_weight * closs
-            loss_value += loss.item()
-    return loss_value / data_size
 
 # @torch.no_grad()
 # def eval_diffusion_model(eval_data):
@@ -306,32 +238,10 @@ for r in range(repeatition):
         print("minority classes {}".format(minority_class))
         print("number of edges {}".format(sum(train_edge_mask)))
 
-    best_loss = float('inf')
-    patience = 5
-    patience_count = 0
-    patience_beta = 1e-3
+
     teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
-    teacher_optimizer = torch.optim.Adam(teacher_model.parameters(), lr=1e-4)
-    with tqdm(total=args.epochs, desc="Teacher Training Progress") as pbar:
-        for e in range(args.epochs):
-            val_loss = train_teacher()
-            if val_loss < (best_loss - patience_beta):
-                best_loss = val_loss
-                patience_count = 0
-            else: patience_count += 1
-            pbar.set_postfix({
-                'Val Loss': f'{val_loss:.4f}', 
-                'Patience': f'{patience_count}/{patience}'
-            })
-            pbar.update(1)
-            if patience_count >= patience:
-                pbar.write(f"Early stopping at epoch {e+1}")
-                pbar.close()
-                break
 
-
-
-    # training process for diffusion model
+    # definition for diffusion model
     denoise_kwargs = {
         "d_numerical" : tab_dataset.num_numerical_features, 
         "categories" : (tab_dataset.categories+1).tolist(), 
@@ -355,6 +265,7 @@ for r in range(repeatition):
         num_numerical_features=tab_dataset.num_numerical_features,
         denoise_fn=denoise_model,
         y_only_model=None,
+        num_timesteps=args.T,
         **diffusion_kwargs,
         device=device,
     )
@@ -362,35 +273,17 @@ for r in range(repeatition):
     print("The number of parameters = ", num_params)
     tab_diffusion.to(device)
     tab_diffusion.train()
-
-    dif_optimizer = torch.optim.Adam(tab_diffusion.parameters(), lr=args.dif_lr)
-
-    best_loss = float('inf')
-    patience = 5
-    patience_count = 0
-    patience_beta = 2e-4
-    dif_epoch = 1000
-    with tqdm(total=dif_epoch, desc="Diffusion Training") as pbar:
-        for e in range(dif_epoch):
-            val_loss = train_tabdiff()
-            if val_loss < (best_loss - patience_beta):
-                best_loss = val_loss
-                patience_count = 0
-            else: patience_count += 1
-            pbar.set_postfix({
-                'Val Loss': f'{val_loss:.4f}', 
-                'Best Loss': f'{best_loss:.4f}',
-                'Patience': f'{patience_count}/{patience}'
-            })
-            pbar.update(1)
-            if (e+1) % 10 == 0:
-                ts = datetime.now().strftime(timestamp_format)
-                ckpt_path = osp.join(root_path, "ckpt","tabdiff",args.dataset,"tabdiff_" + args.dataset+"_"+ts+f"_e{e}_"+".pth")
-                VNG_utils.save(tab_diffusion,ckpt_path)
-            if patience_count >= patience:
-                pbar.write(f"Early stopping at epoch {e+1}")
-                pbar.close()
-                break
+    train_args = {
+        "diff_lr" : 1e-4,
+        "tearch_lr" : 1e-3,
+        "el_lr" : 1e-3,
+        "cl_lr" : 1e-3, 
+        "diff_bs" : 64,
+        "device" : device
+    }
+    trainer = SolidTrainer(tab_dataset, data_train_mask, data_val_mask, tab_diffusion, teacher_model, None, None,**train_args)
+    trainer.train_teacher(epochs=args.epochs)
+    trainer.train_diffusion(args)
 
     v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],
                                                         data.y[data_train_mask],
