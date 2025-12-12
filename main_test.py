@@ -26,140 +26,6 @@ from src.denoise import unet
 import src.utils.graphbuilder
 warnings.filterwarnings("ignore")
 
-# def pre_train():
-#     decoder.train()
-#     neg_edge_index = negative_sampling(
-#         edge_index=data.train_pos_edge_index,
-#         num_nodes=data.num_nodes,
-#         num_neg_samples=data.train_pos_edge_index.size(1))
-#     edge_labels = torch.cat([torch.ones(data.train_pos_edge_index.size(1)), torch.zeros(neg_edge_index.size(1))]).to(device)
-#     de_optimizer.zero_grad()
-#     encoder.train()
-#     centloss_criterion.train()
-#     en_optimizer.zero_grad()
-#     centloss_optimizer.zero_grad()
-#     emb = encoder(data.x, edge_index[:,train_edge_mask], None)
-#     cent_loss = centloss_criterion(emb[data_train_mask],data.y[data_train_mask])
-#     pos_edge_scores = decoder(emb,data.train_pos_edge_index)
-#     neg_edge_scores = decoder(emb, neg_edge_index)
-#     edge_scores = torch.cat([pos_edge_scores,neg_edge_scores],dim=0)
-#     de_loss = F.binary_cross_entropy_with_logits(edge_scores, edge_labels)
-#     loss = args.w_con_loss * cent_loss+ de_loss
-#     loss.backward()
-#     # for param in centloss_criterion.parameters():
-#     #     param.grad.data *= (1./args.w_con_loss)
-#     with torch.no_grad():
-#         encoder.eval()
-#         centloss_criterion.eval()
-#         decoder.eval()
-#         emb = encoder(data.x, edge_index[:,train_edge_mask], None)
-#         val_cent_loss = centloss_criterion(emb[data_val_mask],data.y[data_val_mask])
-#         val_pos_edge_scores = decoder(emb, data.val_pos_edge_index)
-#         val_neg_edge_scores = decoder(emb, data.val_neg_edge_index.to(device))
-#         val_edge_scores = torch.cat([val_pos_edge_scores,val_neg_edge_scores],dim=0)
-#         val_edge_labels = torch.cat([torch.ones(data.val_pos_edge_index.size(1)), torch.zeros(data.val_neg_edge_index.size(1))]).to(device)
-#         val_recon_loss = F.binary_cross_entropy_with_logits(val_edge_scores, val_edge_labels)
-#         val_loss = args.w_con_loss * val_cent_loss + val_recon_loss
-#     en_optimizer.step()
-#     # cent_scheduler.step(val_cent_loss)
-#     centloss_optimizer.step()
-#     # de_optimizer.step()
-#     de_scheduler.step(val_recon_loss)
-#     return val_loss,val_cent_loss, val_recon_loss
-
-# def train_diffusion_model():
-#     train_feat_data = emb_data.x[data_train_mask]
-#     train_label_data = emb_data.y[data_train_mask]
-
-#     eval_feat = emb_data.x[data_val_mask]
-#     eval_label = emb_data.y[data_val_mask]
-#     class_mask = torch.zeros((train_feat_data.shape[0]),dtype=torch.bool,device=device)
-#     train_dataset = TensorDataset(train_feat_data,train_label_data,class_mask)
-#     data_loader = DataLoader(train_dataset, args.batch_size, shuffle=True)
-#     loss_value = 0.0
-#     class_dis = VNG_utils.class_dis(emb_data.y[data_train_mask],n_cls)
-#     class_dis = class_dis / sum(class_dis)
-#     class_mask = VNG_utils.dis_based_class_mask(train_label_data,class_dis,n_cls,train_label_data.shape[0],args.guidance_drop_prob,adjustment_factor=args.adjustment_factor,device=device)
-#     # print("{} guidance, hard label of guidance is:".format(sum(class_mask)))
-#     # print(train_label_data[class_mask].argmax(1))
-#     train_dataset.tensors = (train_feat_data, train_label_data, class_mask)
-#     data_loader = DataLoader(train_dataset, args.batch_size, shuffle=True)
-#     for inputs,targets,c_mask in data_loader:
-#         # 对节点特征进行padding,以避免unet下采样中出现奇数纬度导致分辨率不匹配
-#         inputs = F.pad(inputs,pad=args.padding,mode="constant",value=0).to(device)
-#         targets = F.one_hot(targets,num_classes=n_cls)
-#         soft_labels = teacher_model.softmax_with_temperature(inputs,args.temperature)
-#         targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
-        
-#         inputs = torch.unsqueeze(inputs,dim=1)
-#         # print(inputs.shape)
-#         dif_optimizer.zero_grad()
-#         targets = targets.to(device)
-#         # 按照一定的概率将guidance置空，由此只用一个backbone训练出适用于两种情况（有无条件）的模型
-#         loss = diffusion_model.loss(inputs,targets,c_mask.to(torch.int32),args.padding)
-#         loss.backward()
-#         dif_optimizer.step()
-#         loss_value += loss.item()
-#     val_class_mask = VNG_utils.dis_based_class_mask(eval_label,class_dis,n_cls,eval_label.shape[0],args.guidance_drop_prob,adjustment_factor=args.adjustment_factor,device=device)
-#     eval_data = [eval_feat,eval_label,val_class_mask.to(torch.int32)]
-#     val_loss = eval_diffusion_model(eval_data)
-#     return val_loss
-
-# @torch.no_grad()
-# def eval_diffusion_model(eval_data):
-#     diffusion_model.eval()
-#     with torch.no_grad():
-#         feat_dataset = TensorDataset(eval_data[0],eval_data[1],eval_data[2])
-#         test_data_loader = DataLoader(feat_dataset, batch_size=32, shuffle=True)
-#         data_size = len(test_data_loader.dataset)
-#         loss_value = 0.0
-#         for inputs,targets,c_mask in test_data_loader:
-#             # 对节点特征进行padding以避免unet下采样中出现奇数纬度导致分辨率不匹配
-#             inputs = F.pad(inputs,pad=args.padding,mode="constant",value=0).to(device)
-#             targets = F.one_hot(targets,num_classes=n_cls)
-#             soft_labels = teacher_model.softmax_with_temperature(inputs,args.temperature)
-#             targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
-#             inputs = torch.unsqueeze(inputs,dim=1)
-#             targets = targets.to(device)
-#             # class_mask = (torch.rand(targets.shape[0]) < 0.15).to(device,torch.int32)
-#             # c_mask = torch.ones_like(c_mask,device=device)
-#             loss = diffusion_model.loss(inputs,targets,c_mask,args.padding)
-#             loss_value += loss.item()
-#     return loss_value / data_size
-
-# def train_gnn_classifier():
-#     classifier.train()
-#     classifier_optimizer.zero_grad()
-#     output = classifier(aug_data.x, new_edge_index[:,train_edge_mask], None)
-#     classifier_criterion(output[data_train_mask], aug_data.y[data_train_mask], weight=weights).backward()
-#     with torch.no_grad():
-#         classifier.eval()
-#         output = classifier(aug_data.x, new_edge_index[:,train_edge_mask], None)
-#         val_loss= F.cross_entropy(output[data_val_mask], aug_data.y[data_val_mask])
-
-#     classifier_optimizer.step()
-#     scheduler.step(val_loss)
-
-# @torch.no_grad()
-# def test_gnn_classifier():
-#     classifier.eval()
-#     logits = classifier(aug_data.x, new_edge_index[:,train_edge_mask], None,)
-#     accs, baccs, f1s = [], [], []
-
-#     for i, mask in enumerate([data_train_mask, data_val_mask, data_test_mask]):
-#         pred = logits[mask].max(1)[1]
-#         y_pred = pred.cpu().numpy()
-#         y_true = aug_data.y[mask].cpu().numpy()
-#         acc = pred.eq(aug_data.y[mask]).sum().item() / mask.sum().item()
-#         bacc = balanced_accuracy_score(y_true, y_pred)
-#         f1 = f1_score(y_true, y_pred, average='macro')
-#         recall = recall_score(y_true, y_pred, average=None)
-#         accs.append(acc)
-#         baccs.append(bacc)
-#         f1s.append(f1)
-#         measure_result = classification_report(y_true, y_pred,digits=4, zero_division=np.nan)
-#     return accs, baccs, f1s, measure_result, recall
-
 
 args = parse_args()
 print(args)
@@ -180,7 +46,9 @@ data = train_test_split_edges(data)
 
 repeatition = 5
 max_n=500
-avg_test_acc, avg_val_acc, avg_val_f1, avg_test_bacc, avg_test_f1 = [], [], [], [], []
+overall_test_acc, overall_val_acc, overall_val_f1, overall_test_bacc, overall_test_f1 = [], [], [], [], []
+overall_mi_recall = []
+overall_ma_recall = []
 mi_recall = []
 ma_recall = []
 
@@ -277,6 +145,7 @@ for r in range(repeatition):
         "el_lr" : 1e-3,
         "cl_lr" : 1e-3, 
         "diff_bs" : args.batch_size,
+        "r" : repeatition,
         "device" : device
     }
 
@@ -284,7 +153,7 @@ for r in range(repeatition):
     edge_decoder = edge_learner.EdgePredicter(n_feat).to(device)
 
     # definition of gnn classifier
-    classifier = gnn.GNN_classifier(args.net, n_feat, args.n_hid, n_cls, args.n_layers, dropout=0.5)
+    classifier = gnn.GNN_classifier(args.net, n_feat, args.n_hid, n_cls, args.n_layers, dropout=0.5).to(device)
 
     trainer = SolidTrainer(tab_dataset, 
                            data_train_mask, 
@@ -297,7 +166,7 @@ for r in range(repeatition):
     
     trainer.train_teacher(epochs=args.epochs)
     trainer.train_edge_learner()
-    trainer.train_diffusion(args)
+    trainer.train_diffusion(args, skip=True, ckpt_path=f"/home/xvwenduan/GraphSOLID/ckpt/tabdiff/Cora/tabdiff_Cora_20251212_211201_e9_.pth")
 
     v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],
                                                         data.y[data_train_mask],
@@ -311,24 +180,61 @@ for r in range(repeatition):
                                                         is_hard_sample = (args.hard_factor == 1.),
                                                         is_beta_sampling = False)
     
+    # construct new nodes and edges then augment the graph
+    new_node_num = v_information['feat'].shape[0]
+    print("{} new nodes".format(new_node_num))
+    aug_data, edge_index, data_train_mask, train_edge_mask = solid.add_new_nodes(data,
+                                                                    v_information['feat'],
+                                                                    v_information['label'],
+                                                                    edge_decoder,
+                                                                    edge_index,
+                                                                    data_train_mask,
+                                                                    train_edge_mask,
+                                                                    device=device)
+    # update trainer data
+    trainer.aug_data = aug_data.to(device)
+    trainer.data_train_mask_aug = data_train_mask.to(device)
+    trainer.data_val_mask_aug = data_val_mask.to(device)
+    trainer.edge_index_aug = edge_index.to(device)
+    trainer.train_edge_mask_aug = train_edge_mask.to(device)
+    trainer.data_test_mask_aug = data_test_mask.to(device)
+    trainer.minority_mask = minority_mask
+    # train gnn classifier on augmented graph
+    best_val_acc, best_val_f1, test_acc, test_bacc, test_f1, best_measure, minority_recall, majority_recall = trainer.train_classifier_vanilla()
+
+    overall_mi_recall.append(sum(minority_recall)/len(minority_recall))
+    overall_ma_recall.append(sum(majority_recall)/len(majority_recall))
+    print("mi recall {}, ma recall {}".format(sum(minority_recall)/len(minority_recall),sum(majority_recall)/len(majority_recall)))
+
+    overall_val_acc.append(best_val_acc)
+    overall_val_f1.append(best_val_f1)
+    overall_test_acc.append(test_acc)
+    overall_test_bacc.append(test_bacc)
+    overall_test_f1.append(test_f1)
+    print(best_measure)
+    print('Test Acc: {:.4f}, BAcc: {:.4f}, F1: {:.4f}'.format(test_acc,test_bacc,test_f1))
+
 
 if repeatition == 1 : exit()
-# ## Calculate statistics ##
-# acc_CI =  (statistics.stdev(avg_test_acc) / (repeatition ** (1/2)))
-# bacc_CI =  (statistics.stdev(avg_test_bacc) / (repeatition ** (1/2)))
-# f1_CI =  (statistics.stdev(avg_test_f1) / (repeatition ** (1/2)))
-# mi_recall_CI = (statistics.stdev(mi_recall) / (repeatition ** (1/2)))
-# ma_recall_CI = (statistics.stdev(ma_recall) / (repeatition ** (1/2)))
-# avg_acc = statistics.mean(avg_test_acc)
-# avg_val_acc = statistics.mean(avg_val_acc)
-# avg_val_f1 = statistics.mean(avg_val_f1)
-# avg_bacc = statistics.mean(avg_test_bacc)
-# avg_f1 = statistics.mean(avg_test_f1)
-# avg_mi_recall = statistics.mean(mi_recall)
-# avg_ma_recall = statistics.mean(ma_recall)
+## Calculate statistics ##
+acc_CI =  (statistics.stdev(overall_test_acc) / (repeatition ** (1/2)))
+val_acc_CI =  (statistics.stdev(overall_val_acc) / (repeatition ** (1/2)))
+val_f1_CI =  (statistics.stdev(overall_val_f1) / (repeatition ** (1/2)))
+bacc_CI =  (statistics.stdev(overall_test_bacc) / (repeatition ** (1/2)))
+f1_CI =  (statistics.stdev(overall_test_f1) / (repeatition ** (1/2)))
+mi_recall_CI = (statistics.stdev(overall_mi_recall) / (repeatition ** (1/2)))
+ma_recall_CI = (statistics.stdev(overall_ma_recall) / (repeatition ** (1/2)))
+
+avg_acc = statistics.mean(overall_test_acc)
+avg_val_acc = statistics.mean(overall_val_acc)
+avg_val_f1 = statistics.mean(overall_val_f1)
+avg_bacc = statistics.mean(overall_test_bacc)
+avg_f1 = statistics.mean(overall_test_f1)
+avg_mi_recall = statistics.mean(overall_mi_recall)
+avg_ma_recall = statistics.mean(overall_ma_recall)
 
 
-# avg_log = 'Test Acc: {:.4f} +- {:.4f}, BAcc: {:.4f} +- {:.4f}, F1: {:.4f} +- {:.4f}, Val Acc: {:.4f}, Val F1: {:.4f}, Mi recall {:.4f}+-{:.4f}, Ma recall {:.4f}+-{:.4f}'
-# avg_log = avg_log.format(avg_acc ,acc_CI ,avg_bacc, bacc_CI, avg_f1, f1_CI, avg_val_acc, avg_val_f1,avg_mi_recall,mi_recall_CI,avg_ma_recall,ma_recall_CI)
-# log = "{}".format(avg_log)
-# print(log)
+avg_log = 'Test Acc: {:.4f} +- {:.4f}, BAcc: {:.4f} +- {:.4f}, F1: {:.4f} +- {:.4f}, Val Acc: {:.4f} +- {:.4f}, Val F1: {:.4f} +- {:.4f}, Mi recall {:.4f}+-{:.4f}, Ma recall {:.4f}+-{:.4f}'
+avg_log = avg_log.format(avg_acc, acc_CI, avg_bacc, bacc_CI, avg_f1, f1_CI, avg_val_acc, val_acc_CI, avg_val_f1, val_f1_CI, avg_mi_recall, mi_recall_CI, avg_ma_recall, ma_recall_CI)
+log = "{}".format(avg_log)
+print(log)

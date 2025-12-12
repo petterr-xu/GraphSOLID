@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.utils.data
 import torch.nn.functional as F
 import dgl
 
@@ -22,6 +21,21 @@ from matplotlib.animation import FuncAnimation
 
 from sklearn.metrics import classification_report,roc_auc_score
 
+def load(model:nn.Module, path, device="cuda:0"):
+    ckpt = torch.load(path, map_location=device)
+    if "state_dict" in ckpt:
+        model.load_state_dict(ckpt["state_dict"])
+        return
+    model.load_state_dict(torch.load(path))
+
+def load_from_class(model_class, file_path, device="cuda:0"):
+    ckpt = torch.load(file_path, map_location=device)
+    config = ckpt["config"]
+
+    # 利用 config 重建模型
+    model = model_class(**config)
+    model.load_state_dict(ckpt["state_dict"])
+    return model
 
 def softmax_with_temperature(logits, temperature):
     adjusted_logits = logits / temperature
@@ -33,7 +47,7 @@ def knn_fast(X, k, b):
     index = 0
     values = torch.zeros(X.shape[0] * (k + 1), device=X.device)
     rows = torch.zeros(X.shape[0] * (k + 1), device=X.device)
-    cols = torch.zeros(X.shape[0] * (k + 1), device=X.device)
+    cols = torch.zeros(X.shape[0] * (k + 1), device=X.device)   
     norm_row = torch.zeros(X.shape[0], device=X.device)
     norm_col = torch.zeros(X.shape[0], device=X.device)
     while index < X.shape[0]:
@@ -131,84 +145,6 @@ def make_random_data_remove(edge_index, label, n_data, n_cls, train_num, train_m
 
     return list(train_num), train_mask, idx_info, node_mask, edge_mask
 
-# ## Construct imb ##
-# def make_imb_data(edge_index, label, n_data, n_cls, ratio, train_mask):
-#     # Sort from major to minor
-#     n_data = torch.tensor(n_data)
-#     sorted_n_data, indices = torch.sort(n_data, descending=True)
-#     inv_indices = np.zeros(n_cls, dtype=np.int64)
-#     for i in range(n_cls):
-#         inv_indices[indices[i].item()] = i
-#     assert (torch.arange(len(n_data))[indices][torch.tensor(inv_indices)] - torch.arange(len(n_data))).sum().abs() < 1e-12
-#     class_dis_ = class_dis(label,n_cls)
-#     # Compute average number of nodes and apply the new rule
-#     avg_num = (torch.sum(class_dis_) // n_cls).item()
-#     class_num_list = []
-#     n_round = []
-
-#     for i in range(n_cls):
-#         if class_dis_[i].item() < avg_num:  # Minority class
-#             new_count = max(1, int(sorted_n_data[i].item() * ratio))
-#             class_num_list.append(new_count)
-#             n_round.append(10)  # Use 10 rounds for minority classes
-#         else:  # Majority class
-#             class_num_list.append(sorted_n_data[i].item())  # Keep majority class unchanged
-#             n_round.append(1)  # No need to remove nodes from majority class
-
-#     class_num_list = np.array(class_num_list)[inv_indices]
-#     n_round = np.array(n_round)[inv_indices]
-
-#     # Compute the number of nodes to be removed for each class
-#     remove_class_num_list = [n_data[i].item() - class_num_list[i] for i in range(n_cls)]
-#     remove_idx_list = [[] for _ in range(n_cls)]
-#     cls_idx_list = []
-#     index_list = torch.arange(len(train_mask), device=train_mask.device)
-#     original_mask = train_mask.clone()
-    
-#     for i in range(n_cls):
-#         cls_idx_list.append(index_list[(label == i) & original_mask])
-
-#     # Iteratively remove low-degree nodes for each class
-#     for i in indices.numpy():
-#         for r in range(1, n_round[i] + 1):
-#             # Mask for nodes that have been removed
-#             node_mask = label.new_ones(label.size(), dtype=torch.bool)
-#             node_mask[sum(remove_idx_list, [])] = False
-
-#             # Filter out edges connected to removed nodes
-#             row, col = edge_index[0], edge_index[1]
-#             row_mask = node_mask[row]
-#             col_mask = node_mask[col]
-#             edge_mask = row_mask & col_mask
-
-#             # Compute degree based on remaining edges
-#             degree = scatter_add(torch.ones_like(col[edge_mask]), col[edge_mask], dim_size=label.size(0)).to(row.device)
-#             degree = degree[cls_idx_list[i]]
-
-#             # Remove nodes with the lowest degree in this round
-#             _, remove_idx = torch.topk(degree, (r * remove_class_num_list[i]) // n_round[i], largest=False)
-#             remove_idx = cls_idx_list[i][remove_idx]
-#             remove_idx_list[i] = list(remove_idx.to('cpu').numpy())
-
-#     # Final mask for remaining nodes
-#     node_mask = label.new_ones(label.size(), dtype=torch.bool)
-#     node_mask[sum(remove_idx_list, [])] = False
-
-#     # Filter edges to remove those connected to removed nodes
-#     row, col = edge_index[0], edge_index[1]
-#     row_mask = node_mask[row]
-#     col_mask = node_mask[col]
-#     edge_mask = row_mask & col_mask
-
-#     # Update train mask to reflect removed nodes
-#     train_mask = node_mask & train_mask
-#     idx_info = []
-    
-#     for i in range(n_cls):
-#         cls_indices = index_list[(label == i) & train_mask]
-#         idx_info.append(cls_indices)
-
-#     return list(class_num_list), train_mask, idx_info, node_mask, edge_mask
 
 def get_step_split(imb_ratio, valid_each, labeling_ratio, all_idx, all_label, nclass):
     base_valid_each = valid_each
@@ -272,42 +208,6 @@ def get_step_split(imb_ratio, valid_each, labeling_ratio, all_idx, all_label, nc
 
     return train_idx, valid_idx, test_idx, train_node
 
-# def load_cora_vanilla(load_cache_file:bool = True,parent_file_path = "CGDM-Im\\dataset\\cora\\"):
-#     """返回一个没有划分训练集、测试集、验证集的图数据.节点的label为onehot编码
-
-#     Args:
-#         load_cache_file (bool, optional): _description_. Defaults to True.
-#         parent_file_path (str, optional): _description_. Defaults to "CGDM-Im\dataset\cora\".
-#     """
-#     parent_file_path = parent_file_path.replace("\\",os.sep)
-#     if load_cache_file:
-#         try:
-#             dgl_graph_list,_ = dgl.load_graphs(parent_file_path+"Cora_vanilla.bin")
-#             return dgl_graph_list[0]
-#         except Exception as ex :
-#             print("local Cora dataset doesn't exist, construct from raw data.")
-#     raw_data = pd.read_csv(parent_file_path + 'cora.content',sep = '\t',header = None)
-#     num = raw_data.shape[0]
-#     a = list(raw_data.index)
-#     b = list(raw_data[0])
-#     c = zip(b,a)
-#     map = dict(c)
-#     features = raw_data.iloc[:,1:-1]
-#     labels = pd.get_dummies(raw_data[1434])
-#     raw_data_cites = pd.read_csv(parent_file_path + 'cora.cites',sep = '\t',header = None)
-#     matrix = np.zeros((num,num))
-#     for i ,j in zip(raw_data_cites[0],raw_data_cites[1]):
-#         x = map[i] ; y = map[j]
-#         matrix[x][y] = matrix[y][x] = 1
-#     features = features.values.tolist()
-#     labels = labels.values.tolist()
-#     nx_graph = nx.from_numpy_array(matrix)
-#     dgl_graph = dgl.from_networkx(nx_graph)
-#     dgl_graph.ndata['feat'] = torch.Tensor(features).to(torch.float)
-#     dgl_graph.ndata['label'] = torch.Tensor(labels).to(torch.int)
-#     dgl.save_graphs(parent_file_path+"Cora_vanilla.bin",dgl_graph)
-#     return dgl_graph
-
 def confidence_dis(soft_labels:torch.Tensor,hard_labels:torch.Tensor,num_classes):
     if hard_labels.dim() > 1:
         hard_labels = hard_labels.argmax(1)
@@ -319,46 +219,6 @@ def confidence_dis(soft_labels:torch.Tensor,hard_labels:torch.Tensor,num_classes
     dis = torch.stack(dis)
     return dis
 
-# def neigh_class_dis(ori_graph:dgl.DGLGraph,num_classes=None):
-#     graph = copy.deepcopy(ori_graph)
-#     labels = graph.ndata["label"]
-#     if labels.dim() > 1:
-#         if len(labels[0]) > 1:
-#             labels = torch.argmax(labels,labels.dim()-1)
-#             graph.ndata["label"] = labels
-#         elif len(labels[0]) == 1:
-#             labels = labels.squeeze(1)
-#             graph.ndata["label"] = labels
-#     if num_classes == None:
-#         num_classes = torch.max(labels)-torch.min(labels)+1
-#     dis_matrix = torch.Tensor(num_classes,num_classes).to(graph.device)
-#     for node_class in range(num_classes):
-#         class_mask = (labels == node_class)
-#         # print(torch.sum(class_mask))
-#         # 提取某类节点的索引
-#         class_indices = torch.nonzero(class_mask,as_tuple=True)[0]
-#         # 遍历索引，统计该类节点的邻居分布
-#         dis_count = torch.zeros(size=[1,num_classes]).to(graph.device)
-#         for node in class_indices:
-#             # 提取邻居
-#             subgraph = dgl.in_subgraph(graph, node,relabel_nodes=True)
-#             # 统计邻居类型分布
-#             label_dis = torch.bincount(subgraph.ndata["label"].to(torch.int),minlength=num_classes)
-#             label_dis[node_class] -= 1 # 去除seed节点本身的干扰
-#             dis_count += label_dis
-#         dis_matrix[node_class] = dis_count / torch.sum(dis_count)
-#     return dis_matrix
-
-# def node_class_dis(graph:dgl.DGLGraph,mask=None,num_classes=None,norm=False)->torch.Tensor:
-#     labels = graph.ndata["label"]
-#     if mask is not None:
-#         labels = labels[mask]
-#     if labels.dim() > 1:
-#         if len(labels[0]) > 1:
-#             labels = torch.argmax(labels,dim=labels.dim()-1)
-#         else:
-#             labels = labels.squeeze(1)
-#     return class_dis(labels,num_classes,norm)
 
 def class_dis(labels,num_classes=None,norm=False):
     if num_classes == None:
@@ -785,10 +645,28 @@ def auc_score(logits:torch.Tensor,targets:torch.Tensor,num_classes):
     score = roc_auc_score(targets,logits,average='macro',multi_class="ovr")
     return score
 
+def extract_config(model:nn.Module):
+    config = {}
+    for k, v in model.__dict__.items():
+        # 跳过内部属性、方法、tensor、layer 等
+        if k.startswith("_"):
+            continue
+        if callable(v):
+            continue
+        # 只保存基础类型
+        if isinstance(v, (int, float, str, bool, list, dict, tuple, type(None))):
+            config[k] = v
+    return config
+
 def save(model,file_path:str):
     try:
         file_path = file_path.replace("\\",os.sep)
-        torch.save(model, file_path)
+        config = extract_config(model)  # 自动提取结构信息
+        ckpt = {
+            "config": config,
+            "state_dict": model.state_dict()
+        }
+        torch.save(ckpt, file_path)
     except FileNotFoundError as fnf:
         print("MODEL IS NOT SAVED!")
 

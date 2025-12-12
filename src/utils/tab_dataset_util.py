@@ -100,6 +100,7 @@ def load_tab_dataset_info(name, path, split_type='public') -> TabDataset:
 
     # 填充 TabDataset
     dataset = TabDataset()
+    dataset.name = name
     dataset.num_numerical_features = len(num_cols)
     dataset.categories = categories
     dataset.n_labels = _infer_n_classes(graph)

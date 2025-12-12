@@ -184,9 +184,9 @@ data = train_test_split_edges(data)
 
 repeatition = 5
 max_n=500
-avg_test_acc, avg_val_acc, avg_val_f1, avg_test_bacc, avg_test_f1 = [], [], [], [], []
-mi_recall = []
-ma_recall = []
+overall_test_acc, overall_val_acc, overall_val_f1, overall_test_bacc, overall_test_f1 = [], [], [], [], []
+overall_mi_recall = []
+overall_ma_recall = []
 
 for r in range(repeatition):
     args.seed = args.seed + 1
@@ -524,35 +524,38 @@ for r in range(repeatition):
 
     minority_recall = best_recall[minority_mask]
     majority_recall = best_recall[~minority_mask]
-    mi_recall.append(sum(minority_recall)/len(minority_recall))
-    ma_recall.append(sum(majority_recall)/len(majority_recall))
+    overall_mi_recall.append(sum(minority_recall)/len(minority_recall))
+    overall_ma_recall.append(sum(majority_recall)/len(majority_recall))
     print("mi recall {}, ma recall {}".format(sum(minority_recall)/len(minority_recall),sum(majority_recall)/len(majority_recall)))
 
-    avg_val_acc.append(best_val_acc)
-    avg_val_f1.append(best_val_f1)
-    avg_test_acc.append(test_acc)
-    avg_test_bacc.append(test_bacc)
-    avg_test_f1.append(test_f1)
+    overall_val_acc.append(best_val_acc)
+    overall_val_f1.append(best_val_f1)
+    overall_test_acc.append(test_acc)
+    overall_test_bacc.append(test_bacc)
+    overall_test_f1.append(test_f1)
     print(best_measure)
     print('Test Acc: {:.4f}, BAcc: {:.4f}, F1: {:.4f}'.format(test_acc,test_bacc,test_f1))
 
 if repeatition == 1 : exit()
 ## Calculate statistics ##
-acc_CI =  (statistics.stdev(avg_test_acc) / (repeatition ** (1/2)))
-bacc_CI =  (statistics.stdev(avg_test_bacc) / (repeatition ** (1/2)))
-f1_CI =  (statistics.stdev(avg_test_f1) / (repeatition ** (1/2)))
-mi_recall_CI = (statistics.stdev(mi_recall) / (repeatition ** (1/2)))
-ma_recall_CI = (statistics.stdev(ma_recall) / (repeatition ** (1/2)))
-avg_acc = statistics.mean(avg_test_acc)
-avg_val_acc = statistics.mean(avg_val_acc)
-avg_val_f1 = statistics.mean(avg_val_f1)
-avg_bacc = statistics.mean(avg_test_bacc)
-avg_f1 = statistics.mean(avg_test_f1)
-avg_mi_recall = statistics.mean(mi_recall)
-avg_ma_recall = statistics.mean(ma_recall)
+acc_CI =  (statistics.stdev(overall_test_acc) / (repeatition ** (1/2)))
+val_acc_CI =  (statistics.stdev(overall_val_acc) / (repeatition ** (1/2)))
+val_f1_CI =  (statistics.stdev(overall_val_f1) / (repeatition ** (1/2)))
+bacc_CI =  (statistics.stdev(overall_test_bacc) / (repeatition ** (1/2)))
+f1_CI =  (statistics.stdev(overall_test_f1) / (repeatition ** (1/2)))
+mi_recall_CI = (statistics.stdev(overall_mi_recall) / (repeatition ** (1/2)))
+ma_recall_CI = (statistics.stdev(overall_ma_recall) / (repeatition ** (1/2)))
+
+avg_acc = statistics.mean(overall_test_acc)
+avg_val_acc = statistics.mean(overall_val_acc)
+avg_val_f1 = statistics.mean(overall_val_f1)
+avg_bacc = statistics.mean(overall_test_bacc)
+avg_f1 = statistics.mean(overall_test_f1)
+avg_mi_recall = statistics.mean(overall_mi_recall)
+avg_ma_recall = statistics.mean(overall_ma_recall)
 
 
-avg_log = 'Test Acc: {:.4f} +- {:.4f}, BAcc: {:.4f} +- {:.4f}, F1: {:.4f} +- {:.4f}, Val Acc: {:.4f}, Val F1: {:.4f}, Mi recall {:.4f}+-{:.4f}, Ma recall {:.4f}+-{:.4f}'
-avg_log = avg_log.format(avg_acc ,acc_CI ,avg_bacc, bacc_CI, avg_f1, f1_CI, avg_val_acc, avg_val_f1,avg_mi_recall,mi_recall_CI,avg_ma_recall,ma_recall_CI)
+avg_log = 'Test Acc: {:.4f} +- {:.4f}, BAcc: {:.4f} +- {:.4f}, F1: {:.4f} +- {:.4f}, Val Acc: {:.4f} +- {:.4f}, Val F1: {:.4f} +- {:.4f}, Mi recall {:.4f}+-{:.4f}, Ma recall {:.4f}+-{:.4f}'
+avg_log = avg_log.format(avg_acc, acc_CI, avg_bacc, bacc_CI, avg_f1, f1_CI, avg_val_acc, val_acc_CI, avg_val_f1, val_f1_CI, avg_mi_recall, mi_recall_CI, avg_ma_recall, ma_recall_CI)
 log = "{}".format(avg_log)
 print(log)

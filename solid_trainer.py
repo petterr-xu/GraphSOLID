@@ -29,7 +29,7 @@ timestamp_format = "%Y%m%d_%H%M%S"
 root_path = osp.dirname(osp.realpath(__file__))
 class SolidTrainer:
     def __init__(self, tabgraph:TabDataset, data_train_mask, data_val_mask, diffusion:nn.Module,teacher:nn.Module, edge_learner:nn.Module, classifier:nn.Module,
-                  diff_lr=1e-4,tearch_lr=1e-3,el_lr=1e-3, cl_lr=1e-3, diff_bs = 64, device='cuda:0'):
+                  diff_lr=1e-4,tearch_lr=1e-3,el_lr=1e-3, cl_lr=1e-3, diff_bs = 64, r = None, plot = False, save_model = True, device='cuda:0'):
         self.tabgraph = tabgraph
         self.aug_data = None
         self.data_train_mask = data_train_mask
@@ -38,6 +38,11 @@ class SolidTrainer:
         self.data_val_mask_aug = None
         self.edge_index_aug = None
         self.train_edge_mask_aug = None
+        self.data_test_mask_aug = None
+        self.minority_mask = None
+        self.repeatition = r
+        self.plot = plot
+        self.save_model = save_model
 
 
         self.diffusion = diffusion
@@ -59,12 +64,11 @@ class SolidTrainer:
         self.classifier_criterion = loss_fn.CrossEntropy().to(device)
         self.classifier_optimizer = torch.optim.Adam([
             dict(params=self.classifier.reg_params, weight_decay=5e-4),
-            dict(params=self.classifier.non_reg_params, weight_decay=0),], lr=cl_lr.lr)
+            dict(params=self.classifier.non_reg_params, weight_decay=0),], lr=cl_lr)
         self.cl_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.classifier_optimizer, mode='min',
                                                                 factor = 0.5,
                                                                 patience = 100,
                                                                 verbose=False)
-
     
     def train_teacher_oneloop(self):
         teacher_model = self.teacher
@@ -83,7 +87,12 @@ class SolidTrainer:
             val_loss = F.cross_entropy(logits,self.data.y[self.data_val_mask])
         return val_loss
     
-    def train_teacher(self, epochs):
+    def train_teacher(self, epochs, skip = False, ckpt_path = None, ckpt_save_epoch = 0):
+        if skip:
+            assert ckpt_path is not None, "Please provide a valid checkpoint path to load the teacher model."
+            VNG_utils.load(self.teacher, ckpt_path)
+            print(f"Loaded teacher model from {ckpt_path}")
+            return
         best_loss = float('inf')
         patience = 5
         patience_count = 0
@@ -100,6 +109,10 @@ class SolidTrainer:
                     'Patience': f'{patience_count}/{patience}'
                 })
                 pbar.update(1)
+                if ckpt_save_epoch > 0 and ((e+1) % ckpt_save_epoch == 0):
+                    ts = datetime.now().strftime(timestamp_format)
+                    path = osp.join(root_path, "ckpt","teacher",self.tabgraph.name,"teacher_" + self.tabgraph.name+"_"+ts+f"_e{e}_"+".pth")
+                    VNG_utils.save(self.teacher,path)
                 if patience_count >= patience:
                     pbar.write(f"Early stopping at epoch {e+1}")
                     pbar.close()
@@ -163,7 +176,12 @@ class SolidTrainer:
                 loss_value += loss.item()
         return loss_value / data_size
     
-    def train_diffusion(self,args):
+    def train_diffusion(self,args, skip = False, ckpt_path = None, ckpt_save_epoch = 10):
+        if skip:
+            assert ckpt_path is not None, "Please provide a valid checkpoint path to load the diffusion model."
+            VNG_utils.load(self.diffusion, ckpt_path)
+            print(f"Loaded diffusion model from {ckpt_path}")
+            return
         best_loss = float('inf')
         patience = 5
         patience_count = 0
@@ -182,7 +200,7 @@ class SolidTrainer:
                     'Patience': f'{patience_count}/{patience}'
                 })
                 pbar.update(1)
-                if (e+1) % 10 == 0:
+                if ckpt_save_epoch > 0 and (e+1) % ckpt_save_epoch == 0:
                     ts = datetime.now().strftime(timestamp_format)
                     ckpt_path = osp.join(root_path, "ckpt","tabdiff",args.dataset,"tabdiff_" + args.dataset+"_"+ts+f"_e{e}_"+".pth")
                     VNG_utils.save(self.diffusion,ckpt_path)
@@ -218,12 +236,17 @@ class SolidTrainer:
         self.de_scheduler.step(val_recon_loss)
         return val_recon_loss
 
-    def train_edge_learner(self, epochs = 2000):
+    def train_edge_learner(self, epochs = 2000, skip = False, ckpt_path = None, ckpt_save_epoch = 10):
+        if skip:
+            assert ckpt_path is not None, "Please provide a valid checkpoint path to load the edge learner model."
+            VNG_utils.load(self.decoder, ckpt_path)
+            print(f"Loaded edge learner model from {ckpt_path}")
+            return
         best_loss = float('inf')
         patience = 20
         patience_count = 0
         patience_beta = 1e-3
-        with tqdm(total=epochs, desc="Pre-train") as pbar:
+        with tqdm(total=epochs, desc="Decoder Training") as pbar:
             for e in range(epochs):
                 val_loss = self.train_edge_learner_oneloop()
                 if val_loss < (best_loss - patience_beta):
@@ -235,18 +258,24 @@ class SolidTrainer:
                     'Patience': f'{patience_count}/{patience}'
                 })
                 pbar.update(1)
+                if ckpt_save_epoch > 0 and ((e+1) % ckpt_save_epoch == 0):
+                    ts = datetime.now().strftime(timestamp_format)
+                    ckpt_path = osp.join(root_path, "ckpt","decoder",self.tabgraph.name,"decoder_" + self.tabgraph.name+"_"+ts+f"_e{e}_"+".pth")
+                    VNG_utils.save(self.decoder,ckpt_path)
                 if patience_count >= patience:
                     pbar.write(f"Early stopping at epoch {e+1}")
                     pbar.close()
                     break
 
     def train_classifier_centloss(self):
-        
         pass
 
-    def train_classifier_vanilla(self, weights=None):
+    def train_classifier_vanilla_oneloop(self, weights=None):
+        device = self.device
         self.classifier.train()
         self.classifier_optimizer.zero_grad()
+        self.aug_data.x = self.aug_data.x.to(device)
+        self.aug_data.y = self.aug_data.y.to(device)
         output = self.classifier(self.aug_data.x, self.edge_index_aug[:,self.train_edge_mask_aug], None)
         self.classifier_criterion(output[self.data_train_mask_aug], self.aug_data.y[self.data_train_mask_aug], weight=weights).backward()
         with torch.no_grad():
@@ -256,3 +285,72 @@ class SolidTrainer:
 
         self.classifier_optimizer.step()
         self.cl_scheduler.step(val_loss)
+
+    def metric_classifier(self):
+        self.classifier.eval()
+        logits = self.classifier(self.aug_data.x, self.edge_index_aug[:,self.train_edge_mask_aug], None,)
+        accs, baccs, f1s = [], [], []
+
+        for i, mask in enumerate([self.data_train_mask_aug, self.data_val_mask_aug, self.data_test_mask_aug]):
+            pred = logits[mask].max(1)[1]
+            y_pred = pred.cpu().numpy()
+            y_true = self.aug_data.y[mask].cpu().numpy()
+            acc = pred.eq(self.aug_data.y[mask]).sum().item() / mask.sum().item()
+            bacc = balanced_accuracy_score(y_true, y_pred)
+            f1 = f1_score(y_true, y_pred, average='macro')
+            recall = recall_score(y_true, y_pred, average=None)
+            accs.append(acc)
+            baccs.append(bacc)
+            f1s.append(f1)
+            measure_result = classification_report(y_true, y_pred,digits=4, zero_division=np.nan)
+        return accs, baccs, f1s, measure_result, recall
+    
+    def train_classifier_vanilla(self, epochs = 1000, weights=None):
+        # 初始化保存数据的列表
+        val_acc_f1_list = []
+        test_acc_f1_list = []
+        val_f1_list = []
+        val_acc_list = []
+        tmp_test_acc_list = []
+        tmp_test_f1_list = []
+
+        with tqdm(total=epochs, desc="Classifier Training Progress") as pbar:
+            for e in range(epochs):
+                self.train_classifier_vanilla_oneloop()
+                accs, bacc, f1s, measure_result, recall = self.metric_classifier()
+                train_acc, val_acc, tmp_test_acc = accs
+                train_f1, val_f1, tmp_test_f1 = f1s
+                val_acc_f1 = (bacc[1] + val_f1) / 2.
+                test_acc_f1 = (tmp_test_acc + tmp_test_f1) / 2.
+            
+                # 保存每轮的数值
+                val_acc_f1_list.append(val_acc_f1)
+                test_acc_f1_list.append(test_acc_f1)
+                val_f1_list.append(val_f1)
+                val_acc_list.append(val_acc)
+                tmp_test_acc_list.append(tmp_test_acc)
+                tmp_test_f1_list.append(tmp_test_f1)
+
+                if val_f1 > best_val_f1:
+                    best_val_bacc = bacc[1]
+                    best_val_acc_f1 = val_acc_f1
+                    best_measure = measure_result
+                    best_val_acc = val_acc
+                    best_val_f1 = val_f1
+                    test_acc = tmp_test_acc
+                    test_bacc = bacc[2]
+                    test_f1 = f1s[2]
+                    best_recall = recall
+                pbar.set_postfix({
+                            'Accuracy': f'{val_acc:.4f}/{best_val_acc:.4f}', 
+                            'F1 score': f'{val_f1:.4f}/{best_val_f1:.4f}'
+                        })
+                pbar.update(1)
+        if(self.plot):
+            VNG_utils.plot_val_test_acc_f1(val_acc_f1_list, test_acc_f1_list,title='acc_f1_{}'.format(self.repeatition))
+            VNG_utils.plot_val_acc_f1(val_f1_list, val_acc_list,title='val_{}'.format(self.repeatition))
+            VNG_utils.plot_tmp_test_acc_f1(tmp_test_acc_list, tmp_test_f1_list, title='test_{}'.format(self.repeatition))
+
+        minority_recall = best_recall[self.minority_mask]
+        majority_recall = best_recall[~self.minority_mask]
+        return best_val_acc, best_val_f1, test_acc, test_bacc, test_f1, best_measure, minority_recall, majority_recall
