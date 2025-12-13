@@ -44,7 +44,7 @@ n_cls = tab_dataset.n_labels
 ori_edge_index = data.edge_index
 data = train_test_split_edges(data)
 
-repeatition = 5
+repeatition = 1
 max_n=500
 overall_test_acc, overall_val_acc, overall_val_f1, overall_test_bacc, overall_test_f1 = [], [], [], [], []
 overall_mi_recall = []
@@ -191,6 +191,11 @@ for r in range(repeatition):
                                                                     data_train_mask,
                                                                     train_edge_mask,
                                                                     device=device)
+    data_val_mask = torch.cat([data_val_mask, torch.zeros(new_node_num, dtype=torch.bool, device=device)])
+    data_test_mask = torch.cat([data_test_mask, torch.zeros(new_node_num, dtype=torch.bool, device=device)])
+    aug_data.train_mask = data_train_mask
+    aug_data.val_mask = data_val_mask
+    aug_data.test_mask = data_test_mask
     # update trainer data
     trainer.aug_data = aug_data.to(device)
     trainer.data_train_mask_aug = data_train_mask.to(device)
@@ -213,6 +218,8 @@ for r in range(repeatition):
     overall_test_f1.append(test_f1)
     print(best_measure)
     print('Test Acc: {:.4f}, BAcc: {:.4f}, F1: {:.4f}'.format(test_acc,test_bacc,test_f1))
+
+    VNG_utils.show_samples_dis(aug_data,f"history_data//figure//aug_"+args.dataset,new_node_num,n_cls)
 
 
 if repeatition == 1 : exit()

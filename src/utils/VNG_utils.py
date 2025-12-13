@@ -495,23 +495,23 @@ def show_samples_dis(data, fold, n_generated_nodes, num_class = 6, trans=None):
     embedding = data.x.detach().cpu().numpy()
     # if trans is not None:
     #     embedding = trans(embedding)
-    g_labels = np.array([0] * (len(embedding) - n_generated_nodes) + [1] * n_generated_nodes)
+    generate_mask = np.array([0] * (len(embedding) - n_generated_nodes) + [1] * n_generated_nodes)
     tsne = TSNE(n_components=2, random_state=42)
     X_tsne = tsne.fit_transform(embedding)
     y_original_np = data.y[:-n_generated_nodes].cpu().detach().numpy()
     y_generated_np = data.y[-n_generated_nodes:].cpu().detach().numpy()
     # print(y_generated_np)
     # 所有样本
-    show_sample_dis(X_tsne[g_labels == 0],
-                    X_tsne[g_labels == 1],
+    show_sample_dis(X_tsne[generate_mask == 0],
+                    X_tsne[generate_mask == 1],
                     y_original_np,
                     y_generated_np,
                     num_class,
                     "All Samples",
                     fold + "\\all_samples.svg")
     # 训练集和生成样本
-    show_sample_dis(X_tsne[np.logical_and(g_labels == 0, data.train_mask.cpu().detach().numpy())],
-                    X_tsne[g_labels == 1],
+    show_sample_dis(X_tsne[np.logical_and(generate_mask == 0, data.train_mask.cpu().detach().numpy())],
+                    X_tsne[generate_mask == 1],
                     data.y[data.train_mask][:-n_generated_nodes].cpu().detach().numpy(),
                     y_generated_np,
                     num_class,
@@ -519,8 +519,8 @@ def show_samples_dis(data, fold, n_generated_nodes, num_class = 6, trans=None):
                     fold + "\\train_samples.svg")
 
     # 测试集和生成样本
-    show_sample_dis(X_tsne[np.logical_and(g_labels == 0, data.test_mask.cpu().detach().numpy())],
-                    X_tsne[g_labels == 1],
+    show_sample_dis(X_tsne[np.logical_and(generate_mask == 0, data.test_mask.cpu().detach().numpy())],
+                    X_tsne[generate_mask == 1],
                     data.y[data.test_mask].cpu().detach().numpy(),
                     y_generated_np,
                     num_class,

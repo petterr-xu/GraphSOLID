@@ -306,6 +306,8 @@ class SolidTrainer:
         return accs, baccs, f1s, measure_result, recall
     
     def train_classifier_vanilla(self, epochs = 1000, weights=None):
+        best_val_acc = test_acc = best_val_f1 = best_val_bacc = best_val_acc_f1 = -1
+        best_measure = None
         # 初始化保存数据的列表
         val_acc_f1_list = []
         test_acc_f1_list = []
