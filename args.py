@@ -42,7 +42,7 @@ def parse_args():
     parser.add_argument('--guidance_drop_prob', type=float, default=0.1, help='drop probability for class mask')
     parser.add_argument('--temperature', type=float, default=4., help='temperature for solft labels')
     parser.add_argument('--guidance', type=float, default=1, help='guidance')
-    parser.add_argument('--hard_factor', type=float, default=0., help='factor that mixup soft labels and hard labels')
+    parser.add_argument('--hard_factor', type=float, default=0.5, help='factor that mixup soft labels and hard labels')
     parser.add_argument('--adjustment_factor', type=float, default=1, help='adjustment class distribution')
     parser.add_argument('--aug_mode', type=str, choices=['mean', 'ratio', 'max'], default='mean', help='augmentation mode')
     parser.add_argument('--n_length', type=int, default=512, help='project length')

@@ -117,6 +117,28 @@ class SolidTrainer:
                     pbar.write(f"Early stopping at epoch {e+1}")
                     pbar.close()
                     break
+
+    @torch.no_grad()
+    def teacher_test(self, x, y):
+        """
+        use teacher model to predict and evaluate the performance on given x and y
+        
+        :param self: 
+        :param x: feature matrix
+        :param y: labels
+        :return: accuracy, f1 score, recall, classification report
+        """
+        self.teacher.eval()
+        with torch.no_grad():
+            logits = self.teacher(x.to(self.device))
+            pred = logits.max(1)[1]
+            y_pred = pred.cpu().numpy()
+            y_true = y.cpu().numpy()
+            acc = pred.eq(y.to(self.device)).sum().item() / y.shape[0]
+            f1 = f1_score(y_true, y_pred, average='macro')
+            recall = recall_score(y_true, y_pred, average=None)
+            measure_result = classification_report(y_true, y_pred,digits=4, zero_division=np.nan)
+        return acc, f1, recall, measure_result
     
     def train_tabdiff_oneloop(self,args):
         device = self.device
@@ -356,3 +378,4 @@ class SolidTrainer:
         minority_recall = best_recall[self.minority_mask]
         majority_recall = best_recall[~self.minority_mask]
         return best_val_acc, best_val_f1, test_acc, test_bacc, test_f1, best_measure, minority_recall, majority_recall
+    

@@ -159,7 +159,7 @@ for r in range(repeatition):
     
     trainer.train_teacher(epochs=args.epochs)
     trainer.train_edge_learner()
-    trainer.train_diffusion(args, skip=False, ckpt_path=f"/home/xvwenduan/GraphSOLID/ckpt/tabdiff/Cora/tabdiff_Cora_20251212_211201_e9_.pth")
+    trainer.train_diffusion(args, skip=True, ckpt_path=f"/home/xvwenduan/GraphSOLID/ckpt/tabdiff/Cora/tabdiff_Cora_20251214_200118_e19_.pth")
 
     v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],
                                                         data.y[data_train_mask],
@@ -176,6 +176,9 @@ for r in range(repeatition):
     # construct new nodes and edges then augment the graph
     new_node_num = v_information['feat'].shape[0]
     print("{} new nodes".format(new_node_num))
+    _, _, _, report_on_gen_samples = trainer.teacher_test(v_information['feat'], v_information['label'])
+    print("Performance on generated samples: ", report_on_gen_samples)
+
     aug_data, edge_index, data_train_mask, train_edge_mask = solid.add_new_nodes(data,
                                                                     v_information['feat'],
                                                                     v_information['label'],
