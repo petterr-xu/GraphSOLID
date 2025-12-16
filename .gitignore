@@ -1,0 +1,7 @@
+data/
+.history/
+__pycache__/
+.DS_Store
+*.whl
+ckpt/
+history_data/

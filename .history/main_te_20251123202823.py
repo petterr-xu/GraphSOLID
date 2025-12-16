@@ -16,8 +16,8 @@ from args import parse_args
 from src import solid,loss_fn
 from src.utils import VNG_utils
 from src.models import gnn,sage,gcn,gat,edge_learner,teacher,diffusion,mlp
+from src.neighbor_dist import get_PPR_adj, get_heat_adj, get_ins_neighbor_dist
 from src.denoise import unet
-import src.utils.graphbuilder
 warnings.filterwarnings("ignore")
 
 def pre_train():
@@ -184,9 +184,9 @@ data = train_test_split_edges(data)
 
 repeatition = 5
 max_n=500
-overall_test_acc, overall_val_acc, overall_val_f1, overall_test_bacc, overall_test_f1 = [], [], [], [], []
-overall_mi_recall = []
-overall_ma_recall = []
+avg_test_acc, avg_val_acc, avg_val_f1, avg_test_bacc, avg_test_f1 = [], [], [], [], []
+mi_recall = []
+ma_recall = []
 
 for r in range(repeatition):
     args.seed = args.seed + 1
@@ -210,7 +210,7 @@ for r in range(repeatition):
         idx_info = VNG_utils.get_idx_info(data.y, n_cls, data_train_mask)
         class_num_list = n_data
         print("num of class in original training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
-        class_num_list, data_train_mask, idx_info, train_node_mask, train_edge_mask = src.utils.graphbuilder.make_longtailed_data_remove(edge_index, data.y, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
+        class_num_list, data_train_mask, idx_info, train_node_mask, train_edge_mask = VNG_utils.make_longtailed_data_remove(edge_index, data.y, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
         if args.keep_edge:
             train_edge_mask = torch.ones_like(train_edge_mask,dtype=torch.bool,device=train_edge_mask.device)
         print("num of class in LT-training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
@@ -524,38 +524,35 @@ for r in range(repeatition):
 
     minority_recall = best_recall[minority_mask]
     majority_recall = best_recall[~minority_mask]
-    overall_mi_recall.append(sum(minority_recall)/len(minority_recall))
-    overall_ma_recall.append(sum(majority_recall)/len(majority_recall))
+    mi_recall.append(sum(minority_recall)/len(minority_recall))
+    ma_recall.append(sum(majority_recall)/len(majority_recall))
     print("mi recall {}, ma recall {}".format(sum(minority_recall)/len(minority_recall),sum(majority_recall)/len(majority_recall)))
 
-    overall_val_acc.append(best_val_acc)
-    overall_val_f1.append(best_val_f1)
-    overall_test_acc.append(test_acc)
-    overall_test_bacc.append(test_bacc)
-    overall_test_f1.append(test_f1)
+    avg_val_acc.append(best_val_acc)
+    avg_val_f1.append(best_val_f1)
+    avg_test_acc.append(test_acc)
+    avg_test_bacc.append(test_bacc)
+    avg_test_f1.append(test_f1)
     print(best_measure)
     print('Test Acc: {:.4f}, BAcc: {:.4f}, F1: {:.4f}'.format(test_acc,test_bacc,test_f1))
 
 if repeatition == 1 : exit()
 ## Calculate statistics ##
-acc_CI =  (statistics.stdev(overall_test_acc) / (repeatition ** (1/2)))
-val_acc_CI =  (statistics.stdev(overall_val_acc) / (repeatition ** (1/2)))
-val_f1_CI =  (statistics.stdev(overall_val_f1) / (repeatition ** (1/2)))
-bacc_CI =  (statistics.stdev(overall_test_bacc) / (repeatition ** (1/2)))
-f1_CI =  (statistics.stdev(overall_test_f1) / (repeatition ** (1/2)))
-mi_recall_CI = (statistics.stdev(overall_mi_recall) / (repeatition ** (1/2)))
-ma_recall_CI = (statistics.stdev(overall_ma_recall) / (repeatition ** (1/2)))
-
-avg_acc = statistics.mean(overall_test_acc)
-avg_val_acc = statistics.mean(overall_val_acc)
-avg_val_f1 = statistics.mean(overall_val_f1)
-avg_bacc = statistics.mean(overall_test_bacc)
-avg_f1 = statistics.mean(overall_test_f1)
-avg_mi_recall = statistics.mean(overall_mi_recall)
-avg_ma_recall = statistics.mean(overall_ma_recall)
+acc_CI =  (statistics.stdev(avg_test_acc) / (repeatition ** (1/2)))
+bacc_CI =  (statistics.stdev(avg_test_bacc) / (repeatition ** (1/2)))
+f1_CI =  (statistics.stdev(avg_test_f1) / (repeatition ** (1/2)))
+mi_recall_CI = (statistics.stdev(mi_recall) / (repeatition ** (1/2)))
+ma_recall_CI = (statistics.stdev(ma_recall) / (repeatition ** (1/2)))
+avg_acc = statistics.mean(avg_test_acc)
+avg_val_acc = statistics.mean(avg_val_acc)
+avg_val_f1 = statistics.mean(avg_val_f1)
+avg_bacc = statistics.mean(avg_test_bacc)
+avg_f1 = statistics.mean(avg_test_f1)
+avg_mi_recall = statistics.mean(mi_recall)
+avg_ma_recall = statistics.mean(ma_recall)
 
 
-avg_log = 'Test Acc: {:.4f} +- {:.4f}, BAcc: {:.4f} +- {:.4f}, F1: {:.4f} +- {:.4f}, Val Acc: {:.4f} +- {:.4f}, Val F1: {:.4f} +- {:.4f}, Mi recall {:.4f}+-{:.4f}, Ma recall {:.4f}+-{:.4f}'
-avg_log = avg_log.format(avg_acc, acc_CI, avg_bacc, bacc_CI, avg_f1, f1_CI, avg_val_acc, val_acc_CI, avg_val_f1, val_f1_CI, avg_mi_recall, mi_recall_CI, avg_ma_recall, ma_recall_CI)
+avg_log = 'Test Acc: {:.4f} +- {:.4f}, BAcc: {:.4f} +- {:.4f}, F1: {:.4f} +- {:.4f}, Val Acc: {:.4f}, Val F1: {:.4f}, Mi recall {:.4f}+-{:.4f}, Ma recall {:.4f}+-{:.4f}'
+avg_log = avg_log.format(avg_acc ,acc_CI ,avg_bacc, bacc_CI, avg_f1, f1_CI, avg_val_acc, avg_val_f1,avg_mi_recall,mi_recall_CI,avg_ma_recall,ma_recall_CI)
 log = "{}".format(avg_log)
 print(log)

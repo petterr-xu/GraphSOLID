@@ -41,8 +41,8 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=64, help='batch size of diffusion model')
     parser.add_argument('--guidance_drop_prob', type=float, default=0.1, help='drop probability for class mask')
     parser.add_argument('--temperature', type=float, default=4., help='temperature for solft labels')
-    parser.add_argument('--guidance', type=float, default=1, help='guidance')
-    parser.add_argument('--hard_factor', type=float, default=0.5, help='factor that mixup soft labels and hard labels')
+    parser.add_argument('--guidance', type=float, default=0.75, help='guidance')
+    parser.add_argument('--hard_factor', type=float, default=0., help='factor that mixup soft labels and hard labels')
     parser.add_argument('--adjustment_factor', type=float, default=1, help='adjustment class distribution')
     parser.add_argument('--aug_mode', type=str, choices=['mean', 'ratio', 'max'], default='mean', help='augmentation mode')
     parser.add_argument('--n_length', type=int, default=512, help='project length')
@@ -54,10 +54,6 @@ def parse_args():
     parser.add_argument('--n_blocks', type=int, default=3, help='number of block of up and down sample in unet')
 
     ## tabdiff setup
-    parser.add_argument('--dloss_weight', type=float, default=1.0, help='weight for discrate loss weight')
-    parser.add_argument('--closs_weight', type=float, default=1.0, help='weight for continuous loss weight')
-    parser.add_argument('--denoise_layers', type=int, default=3, help='number of layers for denoising transformer')
-    parser.add_argument('--d_token', type=int, default=8, help='token dimension for denoising transformer')
     
     
     args = parser.parse_args()

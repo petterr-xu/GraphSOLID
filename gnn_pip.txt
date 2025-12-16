@@ -1,0 +1,5 @@
+pip install --no-cache-dir torch-scatter -f https://data.pyg.org/whl/torch-2.0.1+cpu.html
+pip install --no-cache-dir torch-sparse  -f https://data.pyg.org/whl/torch-2.0.1+cpu.html
+pip install --no-cache-dir torch-cluster -f https://data.pyg.org/whl/torch-2.0.1+cpu.html
+pip install --no-cache-dir torch-spline-conv -f https://data.pyg.org/whl/torch-2.0.1+cpu.html
+pip install torch-geometric

@@ -18,6 +18,7 @@ from src.utils import VNG_utils
 from src.models import gnn,sage,gcn,gat,edge_learner,teacher,diffusion,mlp
 from src.neighbor_dist import get_PPR_adj, get_heat_adj, get_ins_neighbor_dist
 from src.denoise import unet
+import src.utils.graphbuilder
 warnings.filterwarnings("ignore")
 
 def train_gnn_classifier():
@@ -96,7 +97,7 @@ for r in range(repeatition):
     ## Construct a long-tailed graph ##
     # class_num_list, data_train_mask, idx_info, train_node_mask, train_edge_mask = VNG_utils.make_random_data_remove(edge_index, data.y, n_data, n_cls, train_num, data_train_mask.clone())
     # class_num_list, data_train_mask, idx_info, train_node_mask, train_edge_mask = VNG_utils.make_imb_data(edge_index, data.y, n_data, n_cls, args.imb_ratio, data_train_mask.clone())
-    class_num_list, data_train_mask, idx_info, train_node_mask, train_edge_mask = VNG_utils.make_longtailed_data_remove(edge_index, data.y, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
+    class_num_list, data_train_mask, idx_info, train_node_mask, train_edge_mask = src.utils.graphbuilder.make_longtailed_data_remove(edge_index, data.y, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
     print("num of class in LT-training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
     minority_mask = class_num_list < (sum(class_num_list)/n_cls)
     minority_class = [i for i in range(n_cls) if minority_mask[i]]
