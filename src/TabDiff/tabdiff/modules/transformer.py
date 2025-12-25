@@ -47,7 +47,7 @@ class Tokenizer(nn.Module):
     
         x = self.weight[None] * x_num[:, :, None]
 
-        if x_cat is not None:
+        if x_cat is not None and x_cat.shape[1] > 0:
             for start, end in zip(self.category_offsets, torch.cat([self.category_offsets[1:], torch.tensor([x_cat.shape[1]], device=x_cat.device)])):
                 if start < end:
                     x = torch.cat(
@@ -250,12 +250,12 @@ class Reconstructor(nn.Module):
         self.weight = nn.Parameter(Tensor(d_numerical, d_token))  
         nn.init.xavier_uniform_(self.weight, gain=1 / math.sqrt(2))
         self.cat_recons = nn.ModuleList()
-
-        for d in categories:
-            recon = nn.Linear(d_token, d)
-            nn.init.xavier_uniform_(recon.weight, gain=1 / math.sqrt(2))
-            self.cat_recons.append(recon)
-
+        
+        if categories is not None:
+            for d in categories:
+                recon = nn.Linear(d_token, d)
+                nn.init.xavier_uniform_(recon.weight, gain=1 / math.sqrt(2))
+                self.cat_recons.append(recon)
     def forward(self, h):
         h_num  = h[:, :self.d_numerical]
         h_cat  = h[:, self.d_numerical:]

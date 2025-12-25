@@ -101,7 +101,7 @@ class UniModMLP(nn.Module):
             num_layers, d_token, n_head, d_token, factor,
             num_classes=num_classes  # 传递类别数量
         )
-        d_in = d_token * (d_numerical + len(categories))
+        d_in = d_token * (d_numerical + 0 if categories is None else len(categories))
         self.mlp = MLPDiffusion(
             d_in, dim_t=dim_t, use_mlp=use_mlp,
             num_classes=num_classes  # 传递类别数量
@@ -128,7 +128,9 @@ class UniModMLP(nn.Module):
         pred_e = self.decoder(pred_y.reshape(*y.shape), class_labels=class_labels)
         
         x_num_pred, x_cat_pred = self.detokenizer(pred_e)
-        x_cat_pred = torch.cat(x_cat_pred, dim=-1) if len(x_cat_pred) > 0 else torch.zeros_like(x_cat).to(x_num_pred.dtype)
+        if len(x_cat_pred) > 0 :
+            x_cat_pred = torch.cat(x_cat_pred, dim=-1)
+        # x_cat_pred = torch.cat(x_cat_pred, dim=-1) if len(x_cat_pred) > 0 else torch.zeros_like(x_cat).to(x_num_pred.dtype)
 
         return x_num_pred, x_cat_pred
 

@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=64, help='batch size of diffusion model')
     parser.add_argument('--guidance_drop_prob', type=float, default=0.1, help='drop probability for class mask')
     parser.add_argument('--temperature', type=float, default=4., help='temperature for solft labels')
-    parser.add_argument('--guidance', type=float, default=1, help='guidance')
+    parser.add_argument('--guidance', type=float, default=0.75, help='guidance')
     parser.add_argument('--hard_factor', type=float, default=0.5, help='factor that mixup soft labels and hard labels')
     parser.add_argument('--adjustment_factor', type=float, default=1, help='adjustment class distribution')
     parser.add_argument('--aug_mode', type=str, choices=['mean', 'ratio', 'max'], default='mean', help='augmentation mode')
@@ -58,7 +58,10 @@ def parse_args():
     parser.add_argument('--closs_weight', type=float, default=1.0, help='weight for continuous loss weight')
     parser.add_argument('--denoise_layers', type=int, default=3, help='number of layers for denoising transformer')
     parser.add_argument('--d_token', type=int, default=8, help='token dimension for denoising transformer')
-    
-    
+    parser.add_argument('--edm_params', type=dict, default={"precond": True, "sigma_data": 1.0, "net_conditioning": "sigma"}, help='edm parameters')
+    parser.add_argument('--sampler_params', type=dict, default={"stochastic_sampler": True, "second_order_correction": True})
+    parser.add_argument('--noise_dist_params', type=dict, default={"P_mean": -1.2, "P_std": 1.2})
+    parser.add_argument('--noise_schedule_params', type=dict, default={"sigma_min": 0.002, "sigma_max": 80, "rho": 7, "eps_max": 1e-3, "eps_min": 1e-5, "rho_init": 7.0, "rho_offset": 5.0, "k_init":-6.0, "k_offset":1.0})
+
     args = parser.parse_args()
     return args

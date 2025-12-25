@@ -98,14 +98,16 @@ for r in range(repeatition):
         minority_class = [i for i in range(n_cls) if minority_mask[i]]
         print("minority classes {}".format(minority_class))
         print("number of edges {}".format(sum(train_edge_mask)))
-
-
+    
+    encoder = sage.GraphSAGE_res(n_feat,args.n_hid,args.n_hid,nlayer=args.n_en_layers,dropout=0.6).to(device)           
+    n_feat = args.n_hid
     teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
 
     # definition of diffusion model
     denoise_kwargs = {
-        "d_numerical" : tab_dataset.num_numerical_features, 
-        "categories" : (tab_dataset.categories+1).tolist(), 
+        "d_numerical" : n_feat, 
+        # "categories" : (tab_dataset.categories+1).tolist(), 
+        "categories" : None,
         "num_layers" : args.denoise_layers, 
         "d_token" : args.d_token
     }
@@ -117,11 +119,13 @@ for r in range(repeatition):
     denoise_model.to(device)
 
     diffusion_kwargs = {
-        "noise_dist" : "uniform_t"
+        "noise_dist" : "uniform_t",
+        "edm_params" : args.edm_params,
+        "sampler_params" : args.sampler_params,
     }
     tab_diffusion = UnifiedCtimeDiffusion(
-        num_classes=tab_dataset.categories,
-        num_numerical_features=tab_dataset.num_numerical_features,
+        num_classes=np.array([]),
+        num_numerical_features=args.n_hid,
         denoise_fn=denoise_model,
         y_only_model=None,
         num_timesteps=args.T,
@@ -138,12 +142,13 @@ for r in range(repeatition):
         "el_lr" : 1e-3,
         "cl_lr" : 1e-3, 
         "diff_bs" : args.batch_size,
+        "n_hid" : args.n_hid,
         "r" : repeatition,
         "device" : device
     }
 
     # definition of edge learner
-    edge_decoder = edge_learner.EdgePredicter(n_feat).to(device)
+    edge_decoder = edge_learner.EdgePredicter(args.n_hid).to(device)
 
     # definition of gnn classifier
     classifier = gnn.GNN_classifier(args.net, n_feat, args.n_hid, n_cls, args.n_layers, dropout=0.5).to(device)
@@ -151,16 +156,23 @@ for r in range(repeatition):
     trainer = SolidTrainer(tab_dataset, 
                            data_train_mask, 
                            data_val_mask, 
+                           edge_index, 
+                           train_edge_mask,
                            tab_diffusion, 
                            teacher_model, 
                            edge_decoder, 
                            classifier, 
+                           encoder,
                            **train_args)
     
-    trainer.train_teacher(epochs=args.epochs)
-    trainer.train_edge_learner()
-    trainer.train_diffusion(args, skip=True, ckpt_path=f"/home/xvwenduan/GraphSOLID/ckpt/tabdiff/Cora/tabdiff_Cora_20251214_200118_e19_.pth")
+    emb_data = trainer.cent_pretrain(args)
+    # cover data with initial embeddings
+    trainer.cover_data_with_emb()
 
+    trainer.train_teacher(epochs=args.epochs)
+    trainer.train_diffusion(args, skip=False, ckpt_path=f"/home/xvwenduan/GraphSOLID/ckpt/tabdiff/Cora/tabdiff_Cora_20251214_200118_e19_.pth")
+
+    data = emb_data.to(device)
     v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],
                                                         data.y[data_train_mask],
                                                         n_cls,

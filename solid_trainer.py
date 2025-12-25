@@ -13,30 +13,24 @@ from torch.utils.data import TensorDataset, DataLoader
 from torch_geometric.utils import train_test_split_edges,negative_sampling
 from sklearn.metrics import balanced_accuracy_score, f1_score,classification_report,roc_auc_score, accuracy_score, recall_score
 
-from args import parse_args
 from src import solid,loss_fn
 from src.data import TabDataset
-from src.utils import VNG_utils,tab_dataset_util
-from src.TabDiff.tabdiff.metrics import TabMetrics
-from src.TabDiff.tabdiff.modules.main_modules import UniModMLP
-from src.TabDiff.tabdiff.modules.main_modules import Model
-from src.TabDiff.tabdiff.models.unified_ctime_diffusion import UnifiedCtimeDiffusion
-from src.models import gnn,sage,gcn,gat,edge_learner,teacher,diffusion,mlp
-from src.denoise import unet
-import src.utils.graphbuilder
+from src.utils import VNG_utils
 
 timestamp_format = "%Y%m%d_%H%M%S"
 root_path = osp.dirname(osp.realpath(__file__))
 class SolidTrainer:
-    def __init__(self, tabgraph:TabDataset, data_train_mask, data_val_mask, diffusion:nn.Module,teacher:nn.Module, edge_learner:nn.Module, classifier:nn.Module,
-                  diff_lr=1e-4,tearch_lr=1e-3,el_lr=1e-3, cl_lr=1e-3, diff_bs = 64, r = None, plot = False, save_model = True, device='cuda:0'):
+    def __init__(self, tabgraph:TabDataset, data_train_mask, data_val_mask, edge_index, train_edge_mask, diffusion:nn.Module,teacher:nn.Module, edge_learner:nn.Module, classifier:nn.Module, encoder:nn.Module = None,
+                  diff_lr=1e-4,tearch_lr=1e-3,el_lr=1e-3, cl_lr=1e-3, en_lr=1e-3, cent_lr=1e-3, n_hid = 512, diff_bs = 64, r = None, plot = False, save_model = True, device='cuda:0'):
         self.tabgraph = tabgraph
         self.aug_data = None
         self.data_train_mask = data_train_mask
         self.data_val_mask = data_val_mask
+        self.edge_index = edge_index
         self.data_train_mask_aug = None
         self.data_val_mask_aug = None
         self.edge_index_aug = None
+        self.train_edge_mask = train_edge_mask
         self.train_edge_mask_aug = None
         self.data_test_mask_aug = None
         self.minority_mask = None
@@ -50,12 +44,19 @@ class SolidTrainer:
         self.teacher = teacher
         self.decoder = edge_learner
         self.classifier = classifier
+        self.encoder = encoder
         self.data = tabgraph.graph.to(device)
+        self.emb_data = None
         self.device = device
 
         self.teacher_optimizer = torch.optim.Adam(self.teacher.parameters(), lr=tearch_lr)
         self.dif_optimizer = torch.optim.Adam(self.diffusion.parameters(), lr=diff_lr)
         self.de_optimizer = torch.optim.Adam(self.decoder.parameters(), lr=el_lr)
+        self.en_optimizer = torch.optim.Adam(encoder.parameters(), lr=en_lr)
+        if(encoder is not None):
+            self.centloss_criterion = loss_fn.CenterLoss(self.tabgraph.n_labels,n_hid,weight=None).to(device)
+            self.centloss_optimizer = torch.optim.Adam(self.centloss_criterion.parameters(), lr=cent_lr)
+
         self.de_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.de_optimizer, mode='min',
                                                                 factor = 0.8,
                                                                 patience = 100,
@@ -69,7 +70,88 @@ class SolidTrainer:
                                                                 factor = 0.5,
                                                                 patience = 100,
                                                                 verbose=False)
+    def cent_pretrain_oneloop(self,args):
+        device = self.device
+        decoder = self.decoder
+        decoder.train()
+        self.encoder.train()
+        self.centloss_criterion.train()
+        self.en_optimizer.zero_grad()
+        self.centloss_optimizer.zero_grad()
+        neg_edge_index = negative_sampling(
+            edge_index=self.data.train_pos_edge_index,
+            num_nodes=self.data.num_nodes,
+            num_neg_samples=self.data.train_pos_edge_index.size(1))
+        edge_labels = torch.cat([torch.ones(self.data.train_pos_edge_index.size(1)), torch.zeros(neg_edge_index.size(1))]).to(self.device)
+        emb = self.encoder(self.data.x, self.edge_index[:,self.train_edge_mask], None)
+        cent_loss = self.centloss_criterion(emb[self.data_train_mask],self.data.y[self.data_train_mask])
+        pos_edge_scores = self.decoder(emb,self.data.train_pos_edge_index)
+        neg_edge_scores = self.decoder(emb, neg_edge_index)
+        edge_scores = torch.cat([pos_edge_scores,neg_edge_scores],dim=0)
+        de_loss = F.binary_cross_entropy_with_logits(edge_scores, edge_labels)
+        loss = args.w_con_loss * cent_loss+ de_loss
+        loss.backward()
+        # for param in centloss_criterion.parameters():
+        #     param.grad.data *= (1./args.w_con_loss)
+        with torch.no_grad():
+            self.encoder.eval()
+            self.centloss_criterion.eval()
+            self.decoder.eval()
+            emb = self.encoder(self.data.x, self.edge_index[:,self.train_edge_mask], None)
+            val_cent_loss = self.centloss_criterion(emb[self.data_val_mask],self.data.y[self.data_val_mask])
+            val_pos_edge_scores = self.decoder(emb, self.data.val_pos_edge_index)
+            val_neg_edge_scores = self.decoder(emb, self.data.val_neg_edge_index.to(self.device))
+            val_edge_scores = torch.cat([val_pos_edge_scores,val_neg_edge_scores],dim=0)
+            val_edge_labels = torch.cat([torch.ones(self.data.val_pos_edge_index.size(1)), torch.zeros(self.data.val_neg_edge_index.size(1))]).to(self.device)
+            val_recon_loss = F.binary_cross_entropy_with_logits(val_edge_scores, val_edge_labels)
+            val_loss = args.w_con_loss * val_cent_loss + val_recon_loss
+        self.en_optimizer.step()
+        # cent_scheduler.step(val_cent_loss)
+        self.centloss_optimizer.step()
+        # de_optimizer.step()
+        self.de_scheduler.step(val_recon_loss)
+        return val_loss,val_cent_loss, val_recon_loss
     
+    def cent_pretrain(self, args):
+        best_loss = float('inf')
+        patience = 20
+        patience_count = 0
+        patience_beta = 1e-3
+        pre_epoch = 2000
+        with tqdm(total=pre_epoch, desc="Pre-train") as pbar:
+            for e in range(pre_epoch):
+                val_loss, con_loss, recon_loss = self.cent_pretrain_oneloop(args)
+                if val_loss < (best_loss - patience_beta):
+                    best_loss = val_loss
+                    patience_count = 0
+                else: patience_count += 1
+                pbar.set_postfix({
+                    'Val Loss': f'{val_loss:.4f}', 
+                    'Con Loss': f'{con_loss:.4f}', 
+                    'Recon Loss': f'{recon_loss:.4f}',
+                    'Patience': f'{patience_count}/{patience}'
+                })
+                pbar.update(1)
+                if patience_count >= patience:
+                    pbar.write(f"Early stopping at epoch {e+1}")
+                    pbar.close()
+                    break
+
+        self.encoder.eval()
+        embbeddings = self.encoder(self.data.x, self.edge_index[:,self.train_edge_mask], None).detach()
+        emb_data = copy.deepcopy(self.data)
+        emb_data.x = embbeddings
+        self.emb_data = emb_data
+        return emb_data
+
+    def cover_data_with_emb(self):
+        assert self.emb_data is not None, "Please run cent_pretrain() before calling this method."
+        self.data = self.emb_data
+        self.tabgraph.graph = self.emb_data
+        self.tabgraph.n_features = self.emb_data.x.shape[1]
+        self.tabgraph.num_numerical_features = self.emb_data.x.shape[1]
+        self.tabgraph.categories = None
+        
     def train_teacher_oneloop(self):
         teacher_model = self.teacher
         teacher_optimizer = self.teacher_optimizer

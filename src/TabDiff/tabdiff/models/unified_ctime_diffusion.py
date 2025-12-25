@@ -136,7 +136,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
             strategy = 'soft'if is_learnable else 'hard'
             # 生成t步分类噪声数据
             x_cat_t, x_cat_t_soft = self.q_xt(x_cat, move_chance, strategy=strategy)
-
+        else:
+            x_cat_t_soft = None
         # Predict orignal data (distribution) 去噪网络预测
         # 网络同时接收数值和分类数据，通过 Transformer 的自注意力机制捕捉跨特征依赖（如 “收入（数值）”
         #  与 “职业（分类）” 的关联），避免两种特征分离处理导致的关联性丢失（论文核心创新之一，）。
@@ -331,8 +332,6 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         )
         # 2.3 加权组合（传统CFG公式）
         denoised = uncond_denoised + guidance_scale * (cond_denoised - uncond_denoised)
-        raw_logits = uncond_raw_logits + guidance_scale * (cond_raw_logits - uncond_raw_logits)
-
         # 3. 原代码中的去噪更新逻辑（保持不变）
         # 3.1 欧拉法更新数值特征
         d_cur = (x_num_hat - denoised) / sigma_num_hat
@@ -342,6 +341,7 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         x_cat_next = x_cat_cur
         q_xs = torch.zeros_like(x_cat_cur).float()
         if has_cat:
+            raw_logits = uncond_raw_logits + guidance_scale * (cond_raw_logits - uncond_raw_logits)
             logits = self._subs_parameterization(raw_logits, x_cat_hat)
             alpha_t = torch.exp(-sigma_cat_hat).unsqueeze(0).repeat(b, 1)
             alpha_s = torch.exp(-sigma_cat_next).unsqueeze(0).repeat(b, 1)
