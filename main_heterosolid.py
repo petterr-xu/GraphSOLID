@@ -137,7 +137,7 @@ for r in range(repeatition):
     tab_diffusion.to(device)
     tab_diffusion.train()
     train_args = {
-        "diff_lr" : 1e-5,
+        "diff_lr" : 1e-4,
         "tearch_lr" : 1e-3,
         "el_lr" : 1e-3,
         "cl_lr" : 1e-3, 

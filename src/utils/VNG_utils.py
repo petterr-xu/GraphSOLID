@@ -10,13 +10,16 @@ import copy
 import random
 import numpy as np
 import pandas as pd
+import os.path as osp
 import networkx as nx
+import scipy.io as sio
 from scipy import linalg
 import scipy.sparse as sp
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 from matplotlib.colors import Normalize
+from torch_geometric.data import HeteroData
 from matplotlib.animation import FuncAnimation
 
 from sklearn.metrics import classification_report,roc_auc_score
@@ -95,15 +98,77 @@ def get_dataset(name, path, split_type='public',normalize_features=False):
         from torch_geometric.datasets import Coauthor
         return Coauthor(root=path, name='cs', transform=transform)
     elif name == 'Amazon-Products':
-        from torch_geometric.datasets import AmazonProducts
-        return AmazonProducts(root=path, transform=transform)
-    elif name == 'Yelp':
-        from torch_geometric.datasets import Yelp
-        return Yelp(root=path, transform=transform)
+        return load_amazon_hetero(path)
+    elif name == 'YelpChi':
+        return load_yelp_hetero(path)
     else:
         raise NotImplementedError("Not Implemented Dataset!")
 
     return dataset
+
+def load_yelp_hetero(file_path):
+    """
+    加载 YelpChi 异构欺诈数据集
+    节点: Review (评论)
+    关系: 
+        - rur: 相同用户发布的评论
+        - rsr: 对相同产品且评分相同的评论
+        - rtr: 同一月内对相同产品的评论
+    """
+    file_path = osp.join(file_path, 'YelpChi.mat')
+    mat = sio.loadmat(file_path)
+    data = HeteroData()
+    
+    # 处理节点特征与标签
+    # .todense() 确保稀疏矩阵转为稠密张量
+    x = torch.from_numpy(mat['features'].todense()).float()
+    y = torch.from_numpy(mat['label'].flatten()).long()
+    
+    data['review'].x = x
+    data['review'].y = y
+    
+    # 处理三种异构边关系
+    # mat['net_rur'] 等通常是 scipy sparse 矩阵
+    for rel_type in ['rur', 'rsr', 'rtr']:
+        adj = mat[f'net_{rel_type}']
+        row, col = adj.nonzero()
+        edge_index = torch.tensor(np.array([row, col]), dtype=torch.long)
+        
+        # 定义异构边：(源节点, 关系名, 目标节点)
+        data['review', rel_type, 'review'].edge_index = edge_index
+        
+    print(f"YelpChi load success: nodes {x.shape[0]}, edge type: rur, rsr, rtr")
+    return data
+
+def load_amazon_hetero(file_path):
+    """
+    加载 Amazon 异构欺诈数据集
+    节点: User (用户)
+    关系:
+        - upu: 购买过至少一个相同产品的用户
+        - usu: 一周内给出过相同评分的用户
+        - uvu: 评论文本相似度最高的前 5% 的用户对
+    """
+    file_path = osp.join(file_path, 'Amazon.mat')
+    mat = sio.loadmat(file_path)
+    data = HeteroData()
+    
+    x = torch.from_numpy(mat['features'].todense()).float()
+    y = torch.from_numpy(mat['label'].flatten()).long()
+    
+    data['user'].x = x
+    data['user'].y = y
+    
+    # 处理三种异构边关系
+    for rel_type in ['upu', 'usu', 'uvu']:
+        adj = mat[f'net_{rel_type}']
+        row, col = adj.nonzero()
+        edge_index = torch.tensor(np.array([row, col]), dtype=torch.long)
+        
+        data['user', rel_type, 'user'].edge_index = edge_index
+        
+    print(f"Amazon load success: nodes {x.shape[0]}, edge type: upu, usu, uvu")
+    return data
 
 ## Construct random removal ##
 def make_random_data_remove(edge_index, label, n_data, n_cls, train_num, train_mask):
