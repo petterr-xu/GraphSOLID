@@ -10,3 +10,7 @@ class TabDataset:
     n_labels: Optional[int]
     n_features: int
     graph: object # numerical features will be move to the top of feature matrix
+
+class HeteroGraphDataset:
+    name: str
+    

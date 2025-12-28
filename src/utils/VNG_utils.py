@@ -84,10 +84,11 @@ def get_idx_info(label, n_cls, train_mask):
     
 def get_dataset(name, path, split_type='public',normalize_features=False):
     import torch_geometric.transforms as T
+    from torch_geometric.transforms import RandomNodeSplit
     transform=T.NormalizeFeatures() if normalize_features else None
     if name == "Cora" or name == "CiteSeer" or name == "PubMed":
         from torch_geometric.datasets import Planetoid
-        dataset = Planetoid(path, name, transform=transform, split=split_type)
+        return Planetoid(path, name, transform=transform, split=split_type)
     elif name == 'Amazon-Computers':
         from torch_geometric.datasets import Amazon
         return Amazon(root=path, name='computers', transform=transform)
@@ -98,14 +99,18 @@ def get_dataset(name, path, split_type='public',normalize_features=False):
         from torch_geometric.datasets import Coauthor
         return Coauthor(root=path, name='cs', transform=transform)
     elif name == 'Amazon-Products':
-        return load_amazon_hetero(path)
+        data = load_amazon_hetero(path)
+        transform = RandomNodeSplit(num_val=0.2, num_test=0.4)
+        data = transform(data)
+        return data
     elif name == 'YelpChi':
-        return load_yelp_hetero(path)
+        data = load_yelp_hetero(path)
+        transform = RandomNodeSplit(num_val=0.2, num_test=0.4)
+        data = transform(data)
+        return data
     else:
         raise NotImplementedError("Not Implemented Dataset!")
-
-    return dataset
-
+    
 def load_yelp_hetero(file_path):
     """
     加载 YelpChi 异构欺诈数据集
