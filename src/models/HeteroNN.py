@@ -108,13 +108,13 @@ class RGCN(nn.Module):
         return x_dict
 
 class HeteroGNN_classifier(nn.Module):
-    def __init__(self, metadata, nhid, nclass, nlayer=1, dropout=0.5, target_node="review"):
+    def __init__(self, target_node, metadata, nhid, nclass, nlayer=1, dropout=0.5):
         """
-        metadata: 异构图元数据 (ctx.g.metadata())
-        nhid: 隐藏层维度
-        nclass: 类别总数
-        nlayer: MLP 分类器的层数
-        target_node: 需要进行分类的目标节点类型
+        :metadata: 异构图元数据 (ctx.g.metadata())
+        :nhid: 隐藏层维度
+        :nclass: 类别总数
+        :nlayer: MLP 分类器的层数
+        :target_node: 需要进行分类的目标节点类型
         """
         super(HeteroGNN_classifier, self).__init__()
         

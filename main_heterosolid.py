@@ -7,15 +7,15 @@ import numpy as np
 import os.path as osp
 from torch_geometric.utils import train_test_split_edges,negative_sampling
 
-from solid_trainer import SolidTrainer
-from args import parse_args
 from src import solid
-from src.utils import VNG_utils,tab_dataset_util
+from args import parse_args
+from src.utils import VNG_utils
+from solid_trainer import SolidTrainer
 from src.utils.hetero_dataset_util import GraphDataLoader
 from src.TabDiff.tabdiff.modules.main_modules import UniModMLP
 from src.TabDiff.tabdiff.modules.main_modules import Model
 from src.TabDiff.tabdiff.models.unified_ctime_diffusion import UnifiedCtimeDiffusion
-from src.models import gnn,sage,gcn,gat,edge_learner,teacher,diffusion,mlp
+from src.models import gnn,sage,edge_learner,teacher,diffusion,mlp,HeteroNN
 from src.denoise import unet
 import src.utils.graphbuilder
 warnings.filterwarnings("ignore")
@@ -158,7 +158,6 @@ for r in range(repeatition):
         node_type: hetero_ctx.g[node_type].x.shape[1] 
         for node_type in node_types
     }
-    # 实例化增强版预测器
     edge_decoder = edge_learner.HeteroEdgePredicter(
         node_types=node_types,
         edge_types=edge_types,
@@ -166,9 +165,8 @@ for r in range(repeatition):
         n_hid=args.n_hid # 这里的 n_hid 对应 Encoder 的输出维度
     ).to(device)
 
-    # definition of gnn classifier
-    classifier = gnn.GNN_classifier(args.net, n_feat, args.n_hid, n_cls, args.n_layers, dropout=0.5).to(device)
-
+    # definition of hetero-gnn classifier
+    classifier = HeteroNN.HeteroGNN_classifier(target_node=target, metadata=hetero_ctx.g.metadata(), nhid=args.feat_dim, nclass=n_cls, nlayer=args.n_layers, dropout=0.5).to(device)
     trainer = SolidTrainer(hetero_ctx, 
                            data_train_mask, 
                            data_val_mask, 

@@ -16,7 +16,7 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=1e-2, help='learning rate for classifier')
     parser.add_argument('--net', type=str, choices=['GCN', 'GAT', 'SAGE', 'mlp'], default='SAGE', help='GNN backbone')
     parser.add_argument('--n_layers', type=int, default=1, help='the number of layers')
-    parser.add_argument('--feat_dim', type=int, choices=[64,128,256,512], default=128, help='feature dimension')
+    parser.add_argument('--feat_dim', type=int, choices=[64,128,256,512], default=64, help='feature dimension')
     parser.add_argument('--epochs', type=int, default=1500, help='epochs')
     ## encoder setup
     parser.add_argument('--en_lr', type=float, default=1e-2, help='learning rate for encoder')
