@@ -9,7 +9,7 @@ from torch_geometric.utils import train_test_split_edges,negative_sampling
 
 from src import solid
 from args import parse_args
-from src.utils import VNG_utils
+from src.utils import VNG_utils, graphbuilder
 from solid_trainer import SolidTrainer
 from src.utils.hetero_dataset_util import GraphDataLoader
 from src.TabDiff.tabdiff.modules.main_modules import UniModMLP
@@ -17,7 +17,6 @@ from src.TabDiff.tabdiff.modules.main_modules import Model
 from src.TabDiff.tabdiff.models.unified_ctime_diffusion import UnifiedCtimeDiffusion
 from src.models import gnn,sage,edge_learner,teacher,diffusion,mlp,HeteroNN
 from src.denoise import unet
-import src.utils.graphbuilder
 warnings.filterwarnings("ignore")
 
 
@@ -34,8 +33,8 @@ cnfg_path = osp.join(root_path, 'data', args.dataset, 'meta', args.dataset + '.j
 hetero_ctx = loader.load_from_config(cnfg_path, data_path)
 target = hetero_ctx.target_node  # 'review' 或 'user'
 data = hetero_ctx.g.to(device)
-n_feat = hetero_ctx.input_dim
-n_cls = hetero_ctx.num_classes
+n_feat = hetero_ctx.n_features
+n_cls = hetero_ctx.n_classes
 print(data)
 ori_edge_index = data.edge_index
 data = train_test_split_edges(data)
@@ -60,7 +59,17 @@ for r in range(repeatition):
     np.random.seed(args.seed)
 
     edge_index = copy.deepcopy(ori_edge_index)
-    if args.dataset in ['Cora','CiteSeer','PubMed']:
+    if args.dataset in ['YelpChi', 'Amazon-Products']:
+        data_train_mask, data_val_mask, data_test_mask = data.train_mask.clone(), data.val_mask.clone(), data.test_mask.clone()
+        stats = data[target].y[data_train_mask]
+        n_data = []
+        for i in range(n_cls):
+            data_num = (stats == i).sum()
+            n_data.append(int(data_num.item()))
+        idx_info = VNG_utils.get_idx_info(data[target].y, n_cls, data_train_mask)
+        class_num_list = n_data
+        print("num of class in original training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
+    elif args.dataset in ['Cora','CiteSeer','PubMed']:
         data_train_mask, data_val_mask, data_test_mask = data.train_mask.clone(), data.val_mask.clone(), data.test_mask.clone()
         stats = data.y[data_train_mask]
         n_data = []
@@ -70,9 +79,13 @@ for r in range(repeatition):
         idx_info = VNG_utils.get_idx_info(data.y, n_cls, data_train_mask)
         class_num_list = n_data
         print("num of class in original training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
-        class_num_list, data_train_mask, idx_info, train_node_mask, train_edge_mask = src.utils.graphbuilder.make_longtailed_data_remove(edge_index, data.y, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
-        if args.keep_edge:
-            train_edge_mask = torch.ones_like(train_edge_mask,dtype=torch.bool,device=train_edge_mask.device)
+        class_num_list, data_train_mask, _, edge_mask_dict = graphbuilder.make_hetero_longtailed_data_remove(data, target, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
+        # 更新 HeteroData
+        hetero_ctx.g[hetero_ctx.target_node].train_mask = data_train_mask
+        # 更新边索引 (可选，取决于是否想物理删除边)
+        if not args.keep_edge:
+            for etype, mask in edge_mask_dict.items():
+                hetero_ctx.g[etype].edge_index = hetero_ctx.g[etype].edge_index[:, mask]
         print("num of class in LT-training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
         minority_mask = class_num_list < (sum(class_num_list)/n_cls)
         minority_class = [i for i in range(n_cls) if minority_mask[i]]
@@ -95,14 +108,13 @@ for r in range(repeatition):
         train_edge_mask = torch.ones(edge_index.shape[1], dtype=torch.bool).to(device)
 
         class_num_list = [len(item) for item in train_node]
-        idx_info = [torch.tensor(item) for item in train_node]
         print("num of class in step data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
         minority_mask = torch.tensor(class_num_list) < (sum(class_num_list)/n_cls)
         minority_class = [i for i in range(n_cls) if minority_mask[i]]
         print("minority classes {}".format(minority_class))
         print("number of edges {}".format(sum(train_edge_mask)))
     
-    encoder = sage.GraphSAGE_res(n_feat,args.n_hid,args.n_hid,nlayer=args.n_en_layers,dropout=0.6).to(device)           
+    encoder = HeteroNN.HeteroSAGE(hetero_ctx.g.metadata(), args.n_hid, num_layers=args.n_en_layers, dropout=0.6).to(device)
     n_feat = args.n_hid
     teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
 
@@ -168,10 +180,6 @@ for r in range(repeatition):
     # definition of hetero-gnn classifier
     classifier = HeteroNN.HeteroGNN_classifier(target_node=target, metadata=hetero_ctx.g.metadata(), nhid=args.feat_dim, nclass=n_cls, nlayer=args.n_layers, dropout=0.5).to(device)
     trainer = SolidTrainer(hetero_ctx, 
-                           data_train_mask, 
-                           data_val_mask, 
-                           edge_index, 
-                           train_edge_mask,
                            tab_diffusion, 
                            teacher_model, 
                            edge_decoder, 
@@ -184,7 +192,7 @@ for r in range(repeatition):
     trainer.cover_data_with_emb()
 
     trainer.train_teacher(epochs=args.epochs)
-    trainer.train_diffusion(args, skip=False, ckpt_path=f"/home/xvwenduan/GraphSOLID/ckpt/tabdiff/Cora/tabdiff_Cora_20251214_200118_e19_.pth")
+    trainer.train_diffusion(args)
 
     data = emb_data.to(device)
     v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],

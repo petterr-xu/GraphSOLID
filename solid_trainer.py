@@ -51,6 +51,11 @@ class SolidTrainer:
         self.teacher_optimizer = torch.optim.Adam(self.teacher.parameters(), lr=tearch_lr)
         self.dif_optimizer = torch.optim.Adam(self.diffusion.parameters(), lr=diff_lr)
         self.de_optimizer = torch.optim.Adam(self.decoder.parameters(), lr=el_lr)
+
+        self.de_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.de_optimizer, mode='min',
+                                                                factor = 0.8,
+                                                                patience = 100,
+                                                                verbose=False)
         
         if self.encoder is not None:
             self.en_optimizer = torch.optim.Adam(encoder.parameters(), lr=en_lr)
@@ -61,47 +66,120 @@ class SolidTrainer:
         self.classifier_optimizer = torch.optim.Adam(self.classifier.parameters(), lr=cl_lr)
         self.classifier_criterion = loss_fn.CrossEntropy().to(device)
 
-    def cent_pretrain_oneloop(self,args):
+    def cent_pretrain_oneloop(self, args):
         device = self.device
-        decoder = self.decoder
-        decoder.train()
+        target = self.target
+        
+        self.decoder.train()
         self.encoder.train()
         self.centloss_criterion.train()
         self.en_optimizer.zero_grad()
         self.centloss_optimizer.zero_grad()
-        neg_edge_index = negative_sampling(
-            edge_index=self.data.train_pos_edge_index,
-            num_nodes=self.data.num_nodes,
-            num_neg_samples=self.data.train_pos_edge_index.size(1))
-        edge_labels = torch.cat([torch.ones(self.data.train_pos_edge_index.size(1)), torch.zeros(neg_edge_index.size(1))]).to(self.device)
-        emb = self.encoder(self.data.x, self.edge_index[:,self.train_edge_mask], None)
-        cent_loss = self.centloss_criterion(emb[self.data_train_mask],self.data.y[self.data_train_mask])
-        pos_edge_scores = self.decoder(emb,self.data.train_pos_edge_index)
-        neg_edge_scores = self.decoder(emb, neg_edge_index)
-        edge_scores = torch.cat([pos_edge_scores,neg_edge_scores],dim=0)
-        de_loss = F.binary_cross_entropy_with_logits(edge_scores, edge_labels)
-        loss = args.w_con_loss * cent_loss+ de_loss
+        self.de_optimizer.zero_grad()
+
+        emb_dict = self.encoder(self.data.x_dict, self.data.edge_index_dict)
+        cent_loss = self.centloss_criterion(emb_dict[target][self.data_train_mask], 
+                                           self.data[target].y[self.data_train_mask])
+
+        # 计算边重构损失 (遍历所有关系)
+        total_de_loss = 0
+        for edge_type in self.data.edge_types:
+            src_type, rel, dst_type = edge_type
+            
+            # 正样本边
+            pos_edge_index = self.data[edge_type].train_pos_edge_index
+            
+            # 异构负采样：确保采样的点属于该关系对应的节点类型
+            neg_edge_index = negative_sampling(
+                edge_index=pos_edge_index,
+                num_nodes=(self.data[src_type].num_nodes, self.data[dst_type].num_nodes),
+                num_neg_samples=pos_edge_index.size(1)
+            )
+            pos_scores = self.decoder(emb_dict[src_type], emb_dict[dst_type], pos_edge_index)
+            neg_scores = self.decoder(emb_dict[src_type], emb_dict[dst_type], neg_edge_index)
+            scores = torch.cat([pos_scores, neg_scores])
+            labels = torch.cat([torch.ones(pos_scores.size(0)), torch.zeros(neg_scores.size(0))]).to(device)
+            total_de_loss += F.binary_cross_entropy_with_logits(scores, labels)
+
+        # 4. 反向传播
+        loss = args.w_con_loss * cent_loss + total_de_loss
         loss.backward()
-        # for param in centloss_criterion.parameters():
-        #     param.grad.data *= (1./args.w_con_loss)
+        # 5. 验证部分 (逻辑类似，使用 val_data)
         with torch.no_grad():
             self.encoder.eval()
-            self.centloss_criterion.eval()
             self.decoder.eval()
-            emb = self.encoder(self.data.x, self.edge_index[:,self.train_edge_mask], None)
-            val_cent_loss = self.centloss_criterion(emb[self.data_val_mask],self.data.y[self.data_val_mask])
-            val_pos_edge_scores = self.decoder(emb, self.data.val_pos_edge_index)
-            val_neg_edge_scores = self.decoder(emb, self.data.val_neg_edge_index.to(self.device))
-            val_edge_scores = torch.cat([val_pos_edge_scores,val_neg_edge_scores],dim=0)
-            val_edge_labels = torch.cat([torch.ones(self.data.val_pos_edge_index.size(1)), torch.zeros(self.data.val_neg_edge_index.size(1))]).to(self.device)
-            val_recon_loss = F.binary_cross_entropy_with_logits(val_edge_scores, val_edge_labels)
+            self.centloss_criterion.eval()
+            v_emb_dict = self.encoder(self.data.x_dict, self.data.edge_index_dict)
+            val_y = self.data[target].y[self.data_val_mask]
+            val_cent_loss = self.centloss_criterion(v_emb_dict[target][self.data_val_mask], val_y)
+            val_recon_loss = 0
+            for edge_type in self.data.edge_types:
+                src_t, rel, dst_t = edge_type
+                # 使用验证集特有的正样本边
+                v_pos_edge = self.data[edge_type].val_pos_edge_index
+                
+                # 验证集负采样
+                v_neg_edge = negative_sampling(
+                    edge_index=v_pos_edge,
+                    num_nodes=(self.data[src_t].num_nodes, self.data[dst_t].num_nodes),
+                    num_neg_samples=v_pos_edge.size(1)
+                )
+                v_pos_scores = self.decoder(v_emb_dict[src_t], v_emb_dict[dst_t], v_pos_edge)
+                v_neg_scores = self.decoder(v_emb_dict[src_t], v_emb_dict[dst_t], v_neg_edge)
+                
+                v_scores = torch.cat([v_pos_scores, v_neg_scores])
+                v_labels = torch.cat([torch.ones(v_pos_scores.size(0)), torch.zeros(v_neg_scores.size(0))]).to(device)
+                val_recon_loss += F.binary_cross_entropy_with_logits(v_scores, v_labels)
+            
             val_loss = args.w_con_loss * val_cent_loss + val_recon_loss
+        
         self.en_optimizer.step()
-        # cent_scheduler.step(val_cent_loss)
         self.centloss_optimizer.step()
-        # de_optimizer.step()
         self.de_scheduler.step(val_recon_loss)
-        return val_loss,val_cent_loss, val_recon_loss
+            
+        return val_loss, val_cent_loss, val_recon_loss
+    
+    # def cent_pretrain_oneloop(self,args):
+    #     device = self.device
+    #     decoder = self.decoder
+    #     decoder.train()
+    #     self.encoder.train()
+    #     self.centloss_criterion.train()
+    #     self.en_optimizer.zero_grad()
+    #     self.centloss_optimizer.zero_grad()
+    #     neg_edge_index = negative_sampling(
+    #         edge_index=self.data.train_pos_edge_index,
+    #         num_nodes=self.data.num_nodes,
+    #         num_neg_samples=self.data.train_pos_edge_index.size(1))
+    #     edge_labels = torch.cat([torch.ones(self.data.train_pos_edge_index.size(1)), torch.zeros(neg_edge_index.size(1))]).to(self.device)
+    #     emb = self.encoder(self.data.x, self.edge_index[:,self.train_edge_mask], None)
+    #     cent_loss = self.centloss_criterion(emb[self.data_train_mask],self.data.y[self.data_train_mask])
+    #     pos_edge_scores = self.decoder(emb,self.data.train_pos_edge_index)
+    #     neg_edge_scores = self.decoder(emb, neg_edge_index)
+    #     edge_scores = torch.cat([pos_edge_scores,neg_edge_scores],dim=0)
+    #     de_loss = F.binary_cross_entropy_with_logits(edge_scores, edge_labels)
+    #     loss = args.w_con_loss * cent_loss+ de_loss
+    #     loss.backward()
+    #     # for param in centloss_criterion.parameters():
+    #     #     param.grad.data *= (1./args.w_con_loss)
+    #     with torch.no_grad():
+    #         self.encoder.eval()
+    #         self.centloss_criterion.eval()
+    #         self.decoder.eval()
+    #         emb = self.encoder(self.data.x, self.edge_index[:,self.train_edge_mask], None)
+    #         val_cent_loss = self.centloss_criterion(emb[self.data_val_mask],self.data.y[self.data_val_mask])
+    #         val_pos_edge_scores = self.decoder(emb, self.data.val_pos_edge_index)
+    #         val_neg_edge_scores = self.decoder(emb, self.data.val_neg_edge_index.to(self.device))
+    #         val_edge_scores = torch.cat([val_pos_edge_scores,val_neg_edge_scores],dim=0)
+    #         val_edge_labels = torch.cat([torch.ones(self.data.val_pos_edge_index.size(1)), torch.zeros(self.data.val_neg_edge_index.size(1))]).to(self.device)
+    #         val_recon_loss = F.binary_cross_entropy_with_logits(val_edge_scores, val_edge_labels)
+    #         val_loss = args.w_con_loss * val_cent_loss + val_recon_loss
+    #     self.en_optimizer.step()
+    #     # cent_scheduler.step(val_cent_loss)
+    #     self.centloss_optimizer.step()
+    #     # de_optimizer.step()
+    #     self.de_scheduler.step(val_recon_loss)
+    #     return val_loss,val_cent_loss, val_recon_loss
 
     def cent_pretrain(self, args):
         best_loss = float('inf')
@@ -129,10 +207,12 @@ class SolidTrainer:
                     break
 
         self.encoder.eval()
-        embbeddings = self.encoder(self.data.x, self.edge_index[:,self.train_edge_mask], None).detach()
-        emb_data = copy.deepcopy(self.data)
-        emb_data.x = embbeddings
-        self.emb_data = emb_data
+        with torch.no_grad():
+            emb_dict = self.encoder(self.data.x_dict, self.data.edge_index_dict)
+            emb_data = copy.deepcopy(self.data)
+            for ntype, embedding in emb_dict.items():
+                emb_data[ntype].x = embedding.detach()
+            self.emb_data = emb_data
         return emb_data
 
     def cover_data_with_emb(self):
@@ -330,7 +410,8 @@ class SolidTrainer:
             val_recon_loss = F.binary_cross_entropy_with_logits(val_edge_scores, val_edge_labels)
         self.de_scheduler.step(val_recon_loss)
         return val_recon_loss
-
+    
+    @DeprecationWarning
     def train_edge_learner(self, epochs = 2000, skip = False, ckpt_path = None, ckpt_save_epoch = 10):
         if skip:
             assert ckpt_path is not None, "Please provide a valid checkpoint path to load the edge learner model."

@@ -65,7 +65,29 @@ class GraphDataLoader:
         # 这里默认进行 40/20/40 划分，后续也可以通过 context.g 修改
         transform = T.RandomNodeSplit(num_val=0.2, num_test=0.4)
         data = transform(data)
+        # 手动划分验证边 
+        for etype in data.edge_types:
+            data = manual_split_val_edges(data, etype)
         if device:
             data = data.to(device)
         # 6. 封装并返回
         return HeteroGraphContext(meta, data)
+
+def manual_split_val_edges(data, edge_type, val_ratio=0.1):
+    """
+    从 HeteroData 的某个 edge_type 中随机抽取部分边作为验证正样本
+    """
+    edge_index = data[edge_type].edge_index
+    num_edges = edge_index.size(1)
+    num_val = int(num_edges * val_ratio)
+    
+    # 打乱索引并切分
+    perm = torch.randperm(num_edges)
+    val_indices = perm[:num_val]
+    train_indices = perm[num_val:]
+    
+    # 赋值给 data 对象（自定义属性名）
+    data[edge_type].train_pos_edge_index = edge_index[:, train_indices]
+    data[edge_type].val_pos_edge_index = edge_index[:, val_indices]
+    
+    return data

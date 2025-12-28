@@ -32,9 +32,12 @@ loader = GraphDataLoader()
 ctx = loader.load_from_config(cnfg_path, data_path, device)
 metadata = ctx.g.metadata()
 print(ctx.g.node_types)
-print(metadata)
+for edge_type in ctx.g.edge_types:
+    print(ctx.g[edge_type].val_pos_edge_index.shape)
 
-model = HeteroNN.HeteroGNN_classifier(ctx.g.metadata(), nhid=32, nclass=ctx.n_classes, nlayer=2, dropout=0.5, target_node=ctx.target_node)
+print(metadata)
+print(ctx.target_node)
+model = HeteroNN.HeteroGNN_classifier(ctx.target_node, ctx.g.metadata(), nhid=32, nclass=ctx.n_classes, nlayer=2, dropout=0.5)
 model = model.to(device)
 
 # 1. 设置优化器
