@@ -31,9 +31,10 @@ cnfg_path = osp.join(root_path, 'data', dataset, 'meta', dataset + '.json')
 loader = GraphDataLoader()
 ctx = loader.load_from_config(cnfg_path, data_path, device)
 metadata = ctx.g.metadata()
+print(ctx.g.node_types)
 print(metadata)
 
-model = HeteroNN.HeteroSAGE(ctx.g.metadata(), hidden_channels=ctx.n_classes, num_layers=2)
+model = HeteroNN.HeteroGNN_classifier(ctx.g.metadata(), nhid=32, nclass=ctx.n_classes, nlayer=2, dropout=0.5, target_node=ctx.target_node)
 model = model.to(device)
 
 # 1. 设置优化器
@@ -56,7 +57,7 @@ for epoch in range(1001):
     out_dict = model(x_dict, edge_index_dict)
     
     # 取出目标节点的预测结果 [num_nodes, hidden_channels]
-    out = out_dict[target]
+    out = out_dict
     
     # 计算损失 (PyG 的 CrossEntropy 允许输入未经过 Softmax 的特征)
     loss = F.cross_entropy(out[train_mask], y[train_mask])
@@ -71,6 +72,6 @@ for epoch in range(1001):
 model.eval()
 with torch.no_grad():
     out_dict = model(x_dict, edge_index_dict)
-    pred = out_dict[target].argmax(dim=1)
+    pred = out_dict.argmax(dim=1)
     acc = (pred[ctx.g[target].test_mask] == y[ctx.g[target].test_mask]).sum() / ctx.g[target].test_mask.sum()
     print(f"测试集准确率: {acc:.4f}")

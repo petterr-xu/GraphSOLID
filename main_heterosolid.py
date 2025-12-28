@@ -31,11 +31,11 @@ root_path = osp.dirname(osp.realpath(__file__))
 loader = GraphDataLoader()
 data_path = osp.join(root_path, 'data', args.dataset, 'data', args.dataset + '.mat')
 cnfg_path = osp.join(root_path, 'data', args.dataset, 'meta', args.dataset + '.json')
-ctx = loader.load_from_config(cnfg_path, data_path)
-target = ctx.target_node  # 'review' 或 'user'
-data = ctx.g.to(device)
-n_feat = ctx.input_dim
-n_cls = ctx.num_classes
+hetero_ctx = loader.load_from_config(cnfg_path, data_path)
+target = hetero_ctx.target_node  # 'review' 或 'user'
+data = hetero_ctx.g.to(device)
+n_feat = hetero_ctx.input_dim
+n_cls = hetero_ctx.num_classes
 print(data)
 ori_edge_index = data.edge_index
 data = train_test_split_edges(data)
@@ -151,12 +151,25 @@ for r in range(repeatition):
     }
 
     # definition of edge learner
-    edge_decoder = edge_learner.EdgePredicter(args.n_hid).to(device)
+    node_types = hetero_ctx.g.node_types
+    edge_types = hetero_ctx.g.edge_types
+    # 自动生成维度字典 (根据 ctx.g 的特征形状)
+    node_dim_dict = {
+        node_type: hetero_ctx.g[node_type].x.shape[1] 
+        for node_type in node_types
+    }
+    # 实例化增强版预测器
+    edge_decoder = edge_learner.HeteroEdgePredicter(
+        node_types=node_types,
+        edge_types=edge_types,
+        node_dim_dict=node_dim_dict,
+        n_hid=args.n_hid # 这里的 n_hid 对应 Encoder 的输出维度
+    ).to(device)
 
     # definition of gnn classifier
     classifier = gnn.GNN_classifier(args.net, n_feat, args.n_hid, n_cls, args.n_layers, dropout=0.5).to(device)
 
-    trainer = SolidTrainer(ctx, 
+    trainer = SolidTrainer(hetero_ctx, 
                            data_train_mask, 
                            data_val_mask, 
                            edge_index, 
