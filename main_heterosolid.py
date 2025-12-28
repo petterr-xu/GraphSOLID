@@ -31,14 +31,12 @@ root_path = osp.dirname(osp.realpath(__file__))
 loader = GraphDataLoader()
 data_path = osp.join(root_path, 'data', args.dataset, 'data', args.dataset + '.mat')
 cnfg_path = osp.join(root_path, 'data', args.dataset, 'meta', args.dataset + '.json')
-graph_ctx = loader.load_from_config(cnfg_path, data_path, device)
-
-tab_dataset = tab_dataset_util.load_tab_dataset_info(args.dataset, data_path, split_type='full')
-dataset = tab_dataset.graph
-data = tab_dataset.graph.to(device)
-n_feat = tab_dataset.n_features
+ctx = loader.load_from_config(cnfg_path, data_path)
+target = ctx.target_node  # 'review' 或 'user'
+data = ctx.g.to(device)
+n_feat = ctx.input_dim
+n_cls = ctx.num_classes
 print(data)
-n_cls = tab_dataset.n_labels
 ori_edge_index = data.edge_index
 data = train_test_split_edges(data)
 
@@ -81,11 +79,11 @@ for r in range(repeatition):
         print("minority classes {}".format(minority_class))
         print("number of edges {}".format(sum(train_edge_mask)))
     elif args.dataset in ['Coauthor-CS', 'Amazon-Computers', 'Amazon-Photo']:
-        train_idx, valid_idx, test_idx, train_node = VNG_utils.get_step_split(imb_ratio=args.imb_ratio, \
-                                                                    valid_each=int(data.x.shape[0] * 0.1 / n_cls), \
-                                                                    labeling_ratio=0.1, \
-                                                                    all_idx=list(range(data.x.shape[0])), \
-                                                                    all_label=data.y.cpu().detach().numpy(), \
+        train_idx, valid_idx, test_idx, train_node = VNG_utils.get_step_split(imb_ratio=args.imb_ratio,
+                                                                    valid_each=int(data.x.shape[0] * 0.1 / n_cls),
+                                                                    labeling_ratio=0.1,
+                                                                    all_idx=list(range(data.x.shape[0])),
+                                                                    all_label=data.y.cpu().detach().numpy(),
                                                                     nclass=n_cls)
         data_train_mask = torch.zeros(data.x.shape[0]).bool().to(device)
         data_val_mask = torch.zeros(data.x.shape[0]).bool().to(device)
@@ -158,7 +156,7 @@ for r in range(repeatition):
     # definition of gnn classifier
     classifier = gnn.GNN_classifier(args.net, n_feat, args.n_hid, n_cls, args.n_layers, dropout=0.5).to(device)
 
-    trainer = SolidTrainer(tab_dataset, 
+    trainer = SolidTrainer(ctx, 
                            data_train_mask, 
                            data_val_mask, 
                            edge_index, 

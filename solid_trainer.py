@@ -9,67 +9,58 @@ import os.path as osp
 import torch.nn as nn
 from datetime import datetime
 import torch.nn.functional as F
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader 
 from torch_geometric.utils import train_test_split_edges,negative_sampling
 from sklearn.metrics import balanced_accuracy_score, f1_score,classification_report,roc_auc_score, accuracy_score, recall_score
 
 from src import solid,loss_fn
 from src.data import TabDataset
 from src.utils import VNG_utils
+from src.utils.hetero_dataset_util import HeteroGraphContext
 
 timestamp_format = "%Y%m%d_%H%M%S"
 root_path = osp.dirname(osp.realpath(__file__))
 class SolidTrainer:
-    def __init__(self, tabgraph:TabDataset, data_train_mask, data_val_mask, edge_index, train_edge_mask, diffusion:nn.Module,teacher:nn.Module, edge_learner:nn.Module, classifier:nn.Module, encoder:nn.Module = None,
-                  diff_lr=1e-4,tearch_lr=1e-3,el_lr=1e-3, cl_lr=1e-3, en_lr=1e-3, cent_lr=1e-3, n_hid = 512, diff_bs = 64, r = None, plot = False, save_model = True, device='cuda:0'):
-        self.tabgraph = tabgraph
-        self.aug_data = None
-        self.data_train_mask = data_train_mask
-        self.data_val_mask = data_val_mask
-        self.edge_index = edge_index
-        self.data_train_mask_aug = None
-        self.data_val_mask_aug = None
-        self.edge_index_aug = None
-        self.train_edge_mask = train_edge_mask
-        self.train_edge_mask_aug = None
-        self.data_test_mask_aug = None
-        self.minority_mask = None
+    def __init__(self, ctx: HeteroGraphContext, diffusion: nn.Module, teacher: nn.Module, edge_learner: nn.Module,  
+                    classifier: nn.Module, encoder: nn.Module = None,
+                    diff_lr=1e-4, tearch_lr=1e-3, el_lr=1e-3, cl_lr=1e-3, en_lr=1e-3, cent_lr=1e-3, 
+                    n_hid=512, diff_bs=64, r=None, plot=False, save_model=True, device='cuda:0'):
+            
+        self.ctx = ctx
+        self.target = ctx.target_node
+        self.device = device
+        
+        self.data = ctx.g.to(device)
+        self.edge_index_dict = self.data.edge_index_dict
+        self.data_train_mask = self.data[self.target].train_mask
+        self.data_val_mask = self.data[self.target].val_mask
+        self.data_test_mask = self.data[self.target].test_mask
+        
+        self.diff_bs = diff_bs
         self.repeatition = r
         self.plot = plot
         self.save_model = save_model
+        
+        self.diffusion = diffusion.to(device)
+        self.teacher = teacher.to(device)
+        self.decoder = edge_learner.to(device)
+        self.classifier = classifier.to(device)
+        self.encoder = encoder.to(device) if encoder else None
 
-
-        self.diffusion = diffusion
-        self.diff_bs = diff_bs
-        self.teacher = teacher
-        self.decoder = edge_learner
-        self.classifier = classifier
-        self.encoder = encoder
-        self.data = tabgraph.graph.to(device)
-        self.emb_data = None
-        self.device = device
-
+        # 5. 优化器初始化 (逻辑不变)
         self.teacher_optimizer = torch.optim.Adam(self.teacher.parameters(), lr=tearch_lr)
         self.dif_optimizer = torch.optim.Adam(self.diffusion.parameters(), lr=diff_lr)
         self.de_optimizer = torch.optim.Adam(self.decoder.parameters(), lr=el_lr)
-        self.en_optimizer = torch.optim.Adam(encoder.parameters(), lr=en_lr)
-        if(encoder is not None):
-            self.centloss_criterion = loss_fn.CenterLoss(self.tabgraph.n_labels,n_hid,weight=None).to(device)
+        
+        if self.encoder is not None:
+            self.en_optimizer = torch.optim.Adam(encoder.parameters(), lr=en_lr)
+            # 使用 ctx.num_classes 动态设置类别
+            self.centloss_criterion = loss_fn.CenterLoss(self.ctx.num_classes, n_hid).to(device)
             self.centloss_optimizer = torch.optim.Adam(self.centloss_criterion.parameters(), lr=cent_lr)
 
-        self.de_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.de_optimizer, mode='min',
-                                                                factor = 0.8,
-                                                                patience = 100,
-                                                                verbose=False)
-        
+        self.classifier_optimizer = torch.optim.Adam(self.classifier.parameters(), lr=cl_lr)
         self.classifier_criterion = loss_fn.CrossEntropy().to(device)
-        self.classifier_optimizer = torch.optim.Adam([
-            dict(params=self.classifier.reg_params, weight_decay=5e-4),
-            dict(params=self.classifier.non_reg_params, weight_decay=0),], lr=cl_lr)
-        self.cl_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.classifier_optimizer, mode='min',
-                                                                factor = 0.5,
-                                                                patience = 100,
-                                                                verbose=False)
+
     def cent_pretrain_oneloop(self,args):
         device = self.device
         decoder = self.decoder
@@ -111,7 +102,7 @@ class SolidTrainer:
         # de_optimizer.step()
         self.de_scheduler.step(val_recon_loss)
         return val_loss,val_cent_loss, val_recon_loss
-    
+
     def cent_pretrain(self, args):
         best_loss = float('inf')
         patience = 20
@@ -146,11 +137,11 @@ class SolidTrainer:
 
     def cover_data_with_emb(self):
         assert self.emb_data is not None, "Please run cent_pretrain() before calling this method."
-        self.data = self.emb_data
-        self.tabgraph.graph = self.emb_data
-        self.tabgraph.n_features = self.emb_data.x.shape[1]
-        self.tabgraph.num_numerical_features = self.emb_data.x.shape[1]
-        self.tabgraph.categories = None
+        target = self.target
+        new_embeddings = self.emb_data[target].x
+        self.data[target].x = new_embeddings
+        self.ctx.g[target].x = new_embeddings
+        
         
     def train_teacher_oneloop(self):
         teacher_model = self.teacher

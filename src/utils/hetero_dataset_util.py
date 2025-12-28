@@ -5,7 +5,7 @@ import numpy as np
 from torch_geometric.data import HeteroData
 import torch_geometric.transforms as T
 
-class FraudGraphContext:
+class HeteroGraphContext:
     """
     自定义的图数据上下文对象，封装了元数据和 PyG 异构图。
     """
@@ -68,4 +68,4 @@ class GraphDataLoader:
         if device:
             data = data.to(device)
         # 6. 封装并返回
-        return FraudGraphContext(meta, data)
+        return HeteroGraphContext(meta, data)

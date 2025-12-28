@@ -37,31 +37,46 @@ class EdgePredicter(nn.Module):
         prob_adj = emb @ emb.t()
         return (prob_adj > 0).nonzero(as_tuple=False).t()
 
+class HeteroEdgePredicter(nn.Module):
+    def __init__(self, node_types, edge_types, node_dim_dict, n_hid):
+        """
+        node_types: 节点类型列表, ['review', 'user', ...]
+        edge_types: 边三元组列表, [('review', 'rur', 'review'), ...]
+        node_dim_dict: 每个节点类型的输入维度, {'review': 128, 'user': 256}
+        n_hid: 映射后的统一隐空间维度
+        """
+        super().__init__()
 
-# def edge_predictor(z, edge_index):
-#     edge_embeddings = z[edge_index[0]] * z[edge_index[1]]
-#     return torch.sigmoid(edge_embeddings.sum(dim=1))
+        # 维度对齐层：为每种节点类型分配一个 Linear
+        self.node_projectors = nn.ModuleDict({
+            node_type: nn.Linear(node_dim_dict[node_type], n_hid)
+            for node_type in node_types
+        })
+        
+        # 关系特异层：为每种关系分配一个权重矩阵
+        # 即使 src 和 dst 一样，通过不同的 relation 权重也能区分不同边
+        self.rel_weights = nn.ModuleDict({
+            "__".join(edge_type): nn.Linear(n_hid, n_hid, bias=False)
+            for edge_type in edge_types
+        })
 
-# def get_link_labels(pos_edge_index, neg_edge_index):
-#     num_links = pos_edge_index.size(1) + neg_edge_index.size(1)
-#     link_labels = torch.zeros(num_links, dtype=torch.float)
-#     link_labels[:pos_edge_index.size(1)] = 1.
-#     return link_labels
-
-# def train(data, model, optimizer):
-#     model.train()
-
-#     neg_edge_index = negative_sampling(
-#         edge_index=data.train_pos_edge_index,
-#         num_nodes=data.num_nodes,
-#         num_neg_samples=data.train_pos_edge_index.size(1))
-
-#     optimizer.zero_grad()
-#     z = model.encode(data.x, data.train_pos_edge_index)
-#     link_logits = model.decode(z, data.train_pos_edge_index, neg_edge_index)
-#     link_labels = get_link_labels(data.train_pos_edge_index, neg_edge_index).to(data.x.device)
-#     loss = F.binary_cross_entropy_with_logits(link_logits, link_labels)
-#     loss.backward()
-#     optimizer.step()
-
-#     return loss
+    def forward(self, z_dict, edge_index, edge_type):
+        """
+        z_dict: 节点嵌入字典 {type: tensor}
+        edge_index: 当前预测的边索引
+        edge_type: 当前预测的边类型三元组 ('src', 'rel', 'dst')
+        """
+        src_type, rel_name, dst_type = edge_type
+        rel_key = "__".join(edge_type)
+        
+        # 1. 取出对应的嵌入并投影到统一维度
+        z_src = self.node_projectors[src_type](z_dict[src_type])
+        z_dst = self.node_projectors[dst_type](z_dict[dst_type])
+        
+        # 2. 应用关系变换矩阵
+        # 这里模拟了关系对嵌入的影响，使得不同关系下的同一对节点得分不同
+        z_src_rel = self.rel_weights[rel_key](z_src)
+        
+        # 3. 计算点积得分
+        scores = (z_src_rel[edge_index[0]] * z_dst[edge_index[1]]).sum(dim=-1)
+        return scores
