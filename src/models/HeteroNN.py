@@ -81,16 +81,16 @@ class HeteroGAT(torch.nn.Module):
         return x_dict
 
 class RGCN(nn.Module):
-    def __init__(self, metadata, hidden_channels, num_layers, num_heads=4):
+    def __init__(self, metadata, hidden_channels, num_layers):
         super(RGCN, self).__init__()
         super().__init__()
         self.convs = torch.nn.ModuleList()
         self.act = torch.nn.PReLU()
         self.dropout = torch.nn.Dropout(p=0.15)
-        self.bn = torch.nn.BatchNorm1d(num_heads * hidden_channels, momentum=0.01)
+        self.bn = torch.nn.BatchNorm1d(hidden_channels, momentum=0.01)
         for _ in range(num_layers):
             conv = HeteroConv({
-                edge_type: GraphConv((-1,-1), hidden_channels, add_self_loops=False)
+                edge_type: GraphConv((-1,-1), hidden_channels)
                 for edge_type in metadata[1]
             })
             self.convs.append(conv)
@@ -108,7 +108,7 @@ class RGCN(nn.Module):
         return x_dict
 
 class HeteroGNN_classifier(nn.Module):
-    def __init__(self, target_node, metadata, nhid, nclass, nlayer=1, dropout=0.5):
+    def __init__(self, net, target_node, metadata, nhid, nclass, nlayer=1, dropout=0.5):
         """
         :metadata: 异构图元数据 (ctx.g.metadata())
         :nhid: 隐藏层维度
@@ -120,10 +120,20 @@ class HeteroGNN_classifier(nn.Module):
         
         # 定义骨干网络：异构 SAGE
         # 这里的 num_layers 指的是 GNN 的层数
-        self.gnn = HeteroSAGE(metadata, nhid, num_layers=2)
+        if net == 'HeteroSAGE':
+            self.gnn = HeteroSAGE(metadata, nhid, num_layers=2)
+        elif net == 'HeteroGAT':
+            self.gnn = HeteroGAT(metadata, nhid, num_layers=2)
+        elif net == 'RGCN':
+            self.gnn = RGCN(metadata, nhid, num_layers=2)
+        else:
+            raise ValueError(f"Unsupported net type: {net}")
         
         # 定义分类头：MLP
-        self.classifier = mlp.MLP(nhid, nclass, nlayer, dropout)        
+        if net == 'HeteroGAT':
+            self.classifier = mlp.MLP(nhid * 4, nclass, nlayer, dropout)
+        else:
+            self.classifier = mlp.MLP(nhid, nclass, nlayer, dropout)        
         self.target_node = target_node
         
         self.reg_params = list(self.gnn.parameters()) + list(self.classifier.parameters())

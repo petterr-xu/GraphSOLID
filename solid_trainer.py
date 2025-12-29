@@ -22,7 +22,7 @@ timestamp_format = "%Y%m%d_%H%M%S"
 root_path = osp.dirname(osp.realpath(__file__))
 class SolidTrainer:
     def __init__(self, ctx: HeteroGraphContext, diffusion: nn.Module, teacher: nn.Module, edge_learner: nn.Module,  
-                    classifier: nn.Module, encoder: nn.Module = None,
+                    classifier: nn.Module, encoder: nn.Module, minority_mask,
                     diff_lr=1e-4, tearch_lr=1e-3, el_lr=1e-3, cl_lr=1e-3, en_lr=1e-3, cent_lr=1e-3, 
                     n_hid=512, diff_bs=64, r=None, plot=False, save_model=True, device='cuda:0'):
             
@@ -47,6 +47,7 @@ class SolidTrainer:
         self.classifier = classifier.to(device)
         self.encoder = encoder.to(device) if encoder else None
 
+        self.minority_mask = minority_mask
         # 5. 优化器初始化 (逻辑不变)
         self.teacher_optimizer = torch.optim.Adam(self.teacher.parameters(), lr=tearch_lr)
         self.dif_optimizer = torch.optim.Adam(self.diffusion.parameters(), lr=diff_lr)
@@ -60,10 +61,14 @@ class SolidTrainer:
         if self.encoder is not None:
             self.en_optimizer = torch.optim.Adam(encoder.parameters(), lr=en_lr)
             # 使用 ctx.num_classes 动态设置类别
-            self.centloss_criterion = loss_fn.CenterLoss(self.ctx.num_classes, n_hid).to(device)
+            self.centloss_criterion = loss_fn.CenterLoss(self.ctx.n_classes, n_hid).to(device)
             self.centloss_optimizer = torch.optim.Adam(self.centloss_criterion.parameters(), lr=cent_lr)
 
         self.classifier_optimizer = torch.optim.Adam(self.classifier.parameters(), lr=cl_lr)
+        self.cl_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.classifier_optimizer, mode='min',
+                                                                factor = 0.5,
+                                                                patience = 100,
+                                                                verbose=False)
         self.classifier_criterion = loss_fn.CrossEntropy().to(device)
 
     def cent_pretrain_oneloop(self, args):
@@ -135,6 +140,7 @@ class SolidTrainer:
         
         self.en_optimizer.step()
         self.centloss_optimizer.step()
+        self.de_optimizer.step()
         self.de_scheduler.step(val_recon_loss)
             
         return val_loss, val_cent_loss, val_recon_loss
@@ -448,37 +454,74 @@ class SolidTrainer:
 
     def train_classifier_vanilla_oneloop(self, weights=None):
         device = self.device
+        target = self.target
+        
         self.classifier.train()
         self.classifier_optimizer.zero_grad()
-        self.aug_data.x = self.aug_data.x.to(device)
-        self.aug_data.y = self.aug_data.y.to(device)
-        output = self.classifier(self.aug_data.x, self.edge_index_aug[:,self.train_edge_mask_aug], None)
-        self.classifier_criterion(output[self.data_train_mask_aug], self.aug_data.y[self.data_train_mask_aug], weight=weights).backward()
+        
+        # 调用 HeteroGNN_classifier，传入字典格式的数据
+        logits = self.classifier(self.data.x_dict, self.data.edge_index_dict)
+        
+        # 提取目标节点的标签和掩码
+        labels = self.data[target].y
+        train_mask = self.data[target].train_mask
+        val_mask = self.data[target].val_mask
+        
+        # 计算训练损失
+        loss = self.classifier_criterion(logits[train_mask], labels[train_mask], weight=weights)
+        loss.backward()
+        self.classifier_optimizer.step()
+
+        # 验证步骤
         with torch.no_grad():
             self.classifier.eval()
-            output = self.classifier(self.aug_data.x, self.edge_index_aug[:,self.train_edge_mask_aug], None)
-            val_loss= F.cross_entropy(output[self.data_val_mask_aug], self.aug_data.y[self.data_val_mask_aug])
-
+            output = self.classifier(self.data.x_dict, self.data.edge_index_dict)
+            val_loss = F.cross_entropy(output[val_mask], labels[val_mask])
         self.classifier_optimizer.step()
         self.cl_scheduler.step(val_loss)
+        return loss.item(), val_loss.item()
 
     def metric_classifier(self):
         self.classifier.eval()
-        logits = self.classifier(self.aug_data.x, self.edge_index_aug[:,self.train_edge_mask_aug], None,)
+        target = self.target
+        
+        with torch.no_grad():
+            # 获取全图预测结果
+            logits = self.classifier(self.data.x_dict, self.data.edge_index_dict)
+        
         accs, baccs, f1s = [], [], []
+        labels = self.data[target].y
+        
+        # 对应：训练集、验证集、测试集
+        masks = [
+            self.data[target].train_mask, 
+            self.data[target].val_mask, 
+            self.data[target].test_mask
+        ]
 
-        for i, mask in enumerate([self.data_train_mask_aug, self.data_val_mask_aug, self.data_test_mask_aug]):
-            pred = logits[mask].max(1)[1]
+        for i, mask in enumerate(masks):
+            # 过滤出当前 mask 对应的预测和真值
+            mask_logits = logits[mask]
+            mask_labels = labels[mask]
+            
+            pred = mask_logits.max(1)[1]
             y_pred = pred.cpu().numpy()
-            y_true = self.aug_data.y[mask].cpu().numpy()
-            acc = pred.eq(self.aug_data.y[mask]).sum().item() / mask.sum().item()
+            y_true = mask_labels.cpu().numpy()
+            
+            # 计算指标
+            acc = pred.eq(mask_labels).sum().item() / mask.sum().item()
             bacc = balanced_accuracy_score(y_true, y_pred)
             f1 = f1_score(y_true, y_pred, average='macro')
-            recall = recall_score(y_true, y_pred, average=None)
+            
             accs.append(acc)
             baccs.append(bacc)
             f1s.append(f1)
-            measure_result = classification_report(y_true, y_pred,digits=4, zero_division=np.nan)
+            
+            # 仅在测试集时生成详细报告和召回率
+            if i == 2:
+                measure_result = classification_report(y_true, y_pred, digits=4, zero_division=np.nan)
+                recall = recall_score(y_true, y_pred, average=None)
+                
         return accs, baccs, f1s, measure_result, recall
     
     def train_classifier_vanilla(self, epochs = 1000, weights=None):
