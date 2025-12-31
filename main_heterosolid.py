@@ -87,43 +87,42 @@ for r in range(repeatition):
     teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
 
     # definition of diffusion model
+    denoise_nhid = args.n_hid
     denoise_kwargs = {
-        "d_numerical" : n_feat, 
-        # "categories" : (tab_dataset.categories+1).tolist(), 
-        "categories" : None,
-        "num_layers" : args.denoise_layers, 
-        "d_token" : args.d_token
+        "feature_length": denoise_nhid,
+        "n_length": args.n_length,
+        "n_channels": args.n_channels,
+        "ch_mults": args.ch_mults,
+        "is_attn": args.is_attn,
+        "n_blocks": args.n_blocks,
+        "class_channels": args.class_embedding_channel,
+        "time_channels": args.time_embedding_channel,
+        "num_class": n_cls,
     }
+    eps_model = unet.UNet(**denoise_kwargs)
+    # eps_model = unet_vector.UNet(denoise_config)
+    if args.beta_schedule == "lin":
+        beta = torch.linspace(args.beta_bound[0], args.beta_bound[1], args.T)
+    elif args.beta_schedule == "exp":
+        beta_exp = args.beta_bound[0] * (args.beta_bound[1] / args.beta_bound[0]) ** (np.arange(args.T) / args.T)
+        beta = torch.tensor(beta_exp,dtype=torch.float32)
+    elif args.beta_schedule == "quad":
+        beta_quad = args.beta_bound[0] + (np.arange(args.T) / args.T) ** 2 * (args.beta_bound[1] - args.beta_bound[0])
+        beta = torch.tensor(beta_quad,dtype=torch.float32)
+    else:
+        print("NO SUCH BETA SCHEDULE:"+args.beta_schedule)
+        raise Exception
+    diffusion_model = diffusion.GDDPMblock(eps_model,beta,n_steps=args.T,device=device).to(device)
+    dif_optimizer = torch.optim.Adam(diffusion_model.eps_model.parameters(), lr=args.dif_lr)
 
-    denoise_backbone = UniModMLP(
-        **denoise_kwargs
-    )
-    denoise_model = Model(denoise_backbone)
-    denoise_model.to(device)
-
-    diffusion_kwargs = {
-        "noise_dist" : "uniform_t",
-        "edm_params" : args.edm_params,
-        "sampler_params" : args.sampler_params,
-    }
-    tab_diffusion = UnifiedCtimeDiffusion(
-        num_classes=np.array([]),
-        num_numerical_features=args.n_hid,
-        denoise_fn=denoise_model,
-        y_only_model=None,
-        num_timesteps=args.T,
-        **diffusion_kwargs,
-        device=device,
-    )
-    num_params = sum(p.numel() for p in tab_diffusion.parameters())
+    num_params = sum(p.numel() for p in diffusion_model.parameters())
     print("The number of parameters = ", num_params)
-    tab_diffusion.to(device)
-    tab_diffusion.train()
+    diffusion_model.to(device)
     train_args = {
-        "diff_lr" : 1e-4,
-        "tearch_lr" : 1e-3,
-        "el_lr" : 1e-3,
-        "cl_lr" : 1e-3, 
+        "diff_lr" : args.dif_lr,
+        "tearch_lr" : args.teacher_lr,
+        "el_lr" : args.de_lr,
+        "cl_lr" : args.lr, 
         "diff_bs" : args.batch_size,
         "n_hid" : args.n_hid,
         "r" : repeatition,
@@ -148,7 +147,7 @@ for r in range(repeatition):
     # definition of hetero-gnn classifier
     classifier = HeteroNN.HeteroGNN_classifier(net=args.net, target_node=target, metadata=hetero_ctx.g.metadata(), nhid=args.feat_dim, nclass=n_cls, nlayer=args.n_layers, dropout=0.5).to(device)
     trainer = SolidTrainer(hetero_ctx, 
-                           tab_diffusion, 
+                           diffusion_model, 
                            teacher_model, 
                            edge_decoder, 
                            classifier, 
@@ -167,7 +166,7 @@ for r in range(repeatition):
     v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],
                                                         data.y[data_train_mask],
                                                         n_cls,
-                                                        diffusion_model = tab_diffusion,
+                                                        diffusion_model = diffusion_model,
                                                         teacher = teacher_model,
                                                         temperature = args.temperature,
                                                         guidance_scale = args.guidance,
