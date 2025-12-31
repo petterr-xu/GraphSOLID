@@ -81,8 +81,7 @@ for r in range(repeatition):
     np.random.seed(args.seed)
 
     encoder = HeteroNN.HeteroSAGE(hetero_ctx.g.metadata(), args.n_hid, num_layers=args.n_en_layers).to(device)
-    n_feat = args.n_hid
-    teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
+    teacher_model = teacher.MLPTeacher(args.n_hid,n_cls,layers=1,drop=0.4).to(device)
 
     # definition of diffusion model
     denoise_nhid = args.n_hid
@@ -132,14 +131,14 @@ for r in range(repeatition):
     edge_types = hetero_ctx.g.edge_types
     # 自动生成维度字典 (根据 ctx.g 的特征形状)
     node_dim_dict = {
-        node_type: hetero_ctx.g[node_type].x.shape[1] 
+        node_type: args.n_hid # hetero_ctx.g[node_type].x.shape[1] 
         for node_type in node_types
     }
     edge_decoder = edge_learner.HeteroEdgePredicter(
         node_types=node_types,
         edge_types=edge_types,
         node_dim_dict=node_dim_dict,
-        n_hid=args.n_hid # 这里的 n_hid 对应 Encoder 的输出维度
+        n_hid=args.decoder_hid
     ).to(device)
 
     # definition of hetero-gnn classifier
@@ -154,11 +153,15 @@ for r in range(repeatition):
                            **train_args)
     
     trainer.minority_mask = minority_mask
-    emb_data = trainer.cent_pretrain(args)
+    cktp_path = {
+        "encoder": "/home/xvwenduan/GraphSOLID/ckpt/encoder/YelpChi/encoder_YelpChi_20251231_190604_e109_.pth",
+        "decoder": "/home/xvwenduan/GraphSOLID/ckpt/decoder/YelpChi/decoder_YelpChi_20251231_190604_e109_.pth"
+    }
+    emb_data = trainer.cent_pretrain(args, skip=True, ckpt_path=cktp_path, ckpt_save_epoch=10)
     # cover data with initial embeddings
     trainer.update_data(emb_data)
     trainer.train_teacher(epochs=args.epochs)
-    trainer.train_diffusion(args)
+    trainer.train_diffusion(args,ckpt_save_epoch=10)
 
     data = emb_data.to(device)
     v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],

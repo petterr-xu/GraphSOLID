@@ -187,30 +187,52 @@ class SolidTrainer:
     #     self.de_scheduler.step(val_recon_loss)
     #     return val_loss,val_cent_loss, val_recon_loss
 
-    def cent_pretrain(self, args):
-        best_loss = float('inf')
-        patience = 20
-        patience_count = 0
-        patience_beta = 1e-3
-        pre_epoch = 2000
-        with tqdm(total=pre_epoch, desc="Pre-train") as pbar:
-            for e in range(pre_epoch):
-                val_loss, con_loss, recon_loss = self.cent_pretrain_oneloop(args)
-                if val_loss < (best_loss - patience_beta):
-                    best_loss = val_loss
-                    patience_count = 0
-                else: patience_count += 1
-                pbar.set_postfix({
-                    'Val Loss': f'{val_loss:.4f}', 
-                    'Con Loss': f'{con_loss:.4f}', 
-                    'Recon Loss': f'{recon_loss:.4f}',
-                    'Patience': f'{patience_count}/{patience}'
-                })
-                pbar.update(1)
-                if patience_count >= patience:
-                    pbar.write(f"Early stopping at epoch {e+1}")
-                    pbar.close()
-                    break
+    def cent_pretrain(self, args, skip = False, ckpt_path:dict = None, ckpt_save_epoch = 0):
+        if skip:
+            assert ckpt_path is not None, "Please provide a valid checkpoint path to load the pre-trained encoder model."
+            VNG_utils.load(self.encoder, ckpt_path['encoder'])
+            VNG_utils.load(self.decoder, ckpt_path['decoder'])
+            print(f"Loaded pre-trained encoder, decoder and centloss model from {ckpt_path}")
+        else:
+            best_loss = float('inf')
+            patience = 10
+            patience_count = 0
+            patience_beta = 1e-3
+            pre_epoch = 2000
+            total_val_loss, total_con_loss, total_recon_loss = [],[],[]
+            with tqdm(total=pre_epoch, desc="Pre-train") as pbar:
+                for e in range(pre_epoch):
+                    val_loss, con_loss, recon_loss = self.cent_pretrain_oneloop(args)
+                    total_val_loss.append(val_loss.item())
+                    total_con_loss.append(con_loss.item())
+                    total_recon_loss.append(recon_loss.item())
+                    if val_loss < (best_loss - patience_beta):
+                        best_loss = val_loss
+                        patience_count = 0
+                    else: patience_count += 1
+                    pbar.set_postfix({
+                        'Val Loss': f'{val_loss:.4f}', 
+                        'Con Loss': f'{con_loss:.4f}', 
+                        'Recon Loss': f'{recon_loss:.4f}',
+                        'Patience': f'{patience_count}/{patience}'
+                    })
+                    pbar.update(1)
+                    if ckpt_save_epoch > 0 and ((e+1) % ckpt_save_epoch == 0):
+                        ts = datetime.now().strftime(timestamp_format)
+                        encoder_path = osp.join(root_path, "ckpt","encoder",self.ctx.name,"encoder_" + self.ctx.name+"_"+ts+f"_e{e}_"+".pth")
+                        VNG_utils.save(self.encoder,encoder_path)
+                        decoder_path = osp.join(root_path, "ckpt","decoder",self.ctx.name,"decoder_" + self.ctx.name+"_"+ts+f"_e{e}_"+".pth")
+                        VNG_utils.save(self.decoder,decoder_path)
+
+                    if patience_count >= patience:
+                        pbar.write(f"Early stopping at epoch {e+1}")
+                        pbar.close()
+                        break
+            if ckpt_save_epoch > 0:
+                encoder_path = osp.join(root_path, "ckpt","encoder",self.ctx.name,"encoder_" + self.ctx.name+"_"+ts+".pth")
+                VNG_utils.save(self.encoder,encoder_path)
+                decoder_path = osp.join(root_path, "ckpt","decoder",self.ctx.name,"decoder_" + self.ctx.name+"_"+ts+".pth")
+                VNG_utils.save(self.decoder,decoder_path)
 
         self.encoder.eval()
         with torch.no_grad():
@@ -313,7 +335,7 @@ class SolidTrainer:
     
     def train_tabdiff_oneloop(self,args):
         device = self.device
-        n_cls = self.tabgraph.n_labels
+        n_cls = self.ctx.n_classes
         train_feat_data = self.data[self.target].x[self.data_train_mask]
         train_label_data = self.data[self.target].y[self.data_train_mask]
         eval_feat = self.data[self.target].x[self.data_val_mask]
@@ -368,7 +390,7 @@ class SolidTrainer:
                 loss_value += loss.item()
         return loss_value / data_size
     
-    def train_diffusion(self,args, skip = False, ckpt_path = None, ckpt_save_epoch = 10):
+    def train_diffusion(self,args, skip = False, ckpt_path = None, ckpt_save_epoch = 0):
         if skip:
             assert ckpt_path is not None, "Please provide a valid checkpoint path to load the diffusion model."
             VNG_utils.load(self.diffusion, ckpt_path)
@@ -453,7 +475,7 @@ class SolidTrainer:
                 pbar.update(1)
                 if ckpt_save_epoch > 0 and ((e+1) % ckpt_save_epoch == 0):
                     ts = datetime.now().strftime(timestamp_format)
-                    ckpt_path = osp.join(root_path, "ckpt","decoder",self.tabgraph.name,"decoder_" + self.tabgraph.name+"_"+ts+f"_e{e}_"+".pth")
+                    ckpt_path = osp.join(root_path, "ckpt","decoder",self.ctx.name,"decoder_" + self.ctx.name+"_"+ts+f"_e{e}_"+".pth")
                     VNG_utils.save(self.decoder,ckpt_path)
                 if patience_count >= patience:
                     pbar.write(f"Early stopping at epoch {e+1}")

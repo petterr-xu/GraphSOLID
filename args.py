@@ -14,18 +14,19 @@ def parse_args():
     parser.add_argument('--is_vanilla', action='store_true', help='vanilla classifier')
     ## classifier setup
     parser.add_argument('--lr', type=float, default=1e-2, help='learning rate for classifier')
-    parser.add_argument('--net', type=str, choices=['HeteroSAGE', 'HeteroGAT', 'RGCN', 'mlp'], default='HeteroGAT', help='GNN backbone')
+    parser.add_argument('--net', type=str, choices=['HeteroSAGE', 'HeteroGAT', 'RGCN', 'mlp'], default='HeteroSAGE', help='GNN backbone')
     parser.add_argument('--n_layers', type=int, default=1, help='the number of layers')
     parser.add_argument('--feat_dim', type=int, choices=[64,128,256,512], default=64, help='feature dimension')
     parser.add_argument('--epochs', type=int, default=1500, help='epochs')
     ## encoder setup
     parser.add_argument('--en_lr', type=float, default=1e-2, help='learning rate for encoder')
-    parser.add_argument('--n_hid',type=int,default=512)
+    parser.add_argument('--n_hid',type=int,default=128)
     parser.add_argument('--n_en_layers',type=int,default=1)
     parser.add_argument('--w_con_loss',type=float,default=1e-2)
     parser.add_argument('--cent_lr', type=float, default=1e-2, help='learning rate for center loss optimizer')
     ## decoder setup
     parser.add_argument('--de_lr', type=float, default=1e-3, help='learning rate for decoder')
+    parser.add_argument('--decoder_hid',type=int,default=32)
 
     ## teacher setup
     parser.add_argument('--teacher_lr', type=float, default=1e-3, help='learning rate for teacher model')

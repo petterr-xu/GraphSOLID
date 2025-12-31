@@ -42,7 +42,7 @@ class HeteroEdgePredicter(nn.Module):
         """
         node_types: 节点类型列表, ['review', 'user', ...]
         edge_types: 边三元组列表, [('review', 'rur', 'review'), ...]
-        node_dim_dict: 每个节点类型的输入维度, {'review': 128, 'user': 256}
+        node_dim_dict: 每个节点类型的输入维度
         n_hid: 映射后的统一隐空间维度
         """
         super().__init__()

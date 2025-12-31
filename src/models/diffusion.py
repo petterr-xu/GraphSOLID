@@ -13,6 +13,8 @@ class GDDPMblock(nn.Module):
         self.alpha = 1. - self.beta
         # 计算alpha的连乘值alpha bar
         self.alpha_bar = torch.cumprod(self.alpha, dim=0)
+        self.n_steps = n_steps
+        self.sigma2 = self.beta
 
     def remove_padding(self, tensor: torch.Tensor, padding: tuple) -> torch.Tensor:
         """
