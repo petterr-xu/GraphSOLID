@@ -302,12 +302,12 @@ class SolidTrainer:
     def train_tabdiff_oneloop(self,args):
         device = self.device
         n_cls = self.tabgraph.n_labels
-        train_feat_data = self.data.x[self.data_train_mask]
-        train_label_data = self.data.y[self.data_train_mask]
-        eval_feat = self.data.x[self.data_val_mask]
-        eval_label = self.data.y[self.data_val_mask]
+        train_feat_data = self.data[self.target].x[self.data_train_mask]
+        train_label_data = self.data[self.target].y[self.data_train_mask]
+        eval_feat = self.data[self.target].x[self.data_val_mask]
+        eval_label = self.data[self.target].y[self.data_val_mask]
         loss_value = 0.0
-        class_dis = VNG_utils.class_dis(self.data.y[self.data_train_mask],n_cls)
+        class_dis = VNG_utils.class_dis(self.data[self.target].y[self.data_train_mask],n_cls)
         class_dis = class_dis / sum(class_dis)
         class_mask = VNG_utils.dis_based_class_mask(train_label_data,class_dis,n_cls,train_label_data.shape[0],args.guidance_drop_prob,adjustment_factor=args.adjustment_factor,device=device)
         class_mask = class_mask[:, None].repeat(1,n_cls).to(torch.int32)
@@ -323,9 +323,9 @@ class SolidTrainer:
             # print(inputs.shape)
             self.dif_optimizer.zero_grad()
             targets = targets.to(device)
+            inputs = torch.unsqueeze(inputs,dim=1)
             # 按照一定的概率将guidance置空，由此只用一个backbone训练出适用于两种情况（有无条件）的模型
-            dloss, closs = self.diffusion.mixed_loss(inputs,targets,c_mask.to(torch.int32))
-            loss = args.dloss_weight * dloss + args.closs_weight * closs
+            loss = self.diffusion.loss(inputs,targets,c_mask.to(torch.int32),args.padding)
             loss.backward()
             self.dif_optimizer.step()
             loss_value += loss.item()
@@ -337,7 +337,7 @@ class SolidTrainer:
     @torch.no_grad()
     def eval_diffusion_model(self,eval_data,args):
         device = self.device
-        n_cls = self.tabgraph.n_labels
+        n_cls = self.ctx.n_classes
         self.diffusion.eval()
         with torch.no_grad():
             feat_dataset = TensorDataset(eval_data[0],eval_data[1],eval_data[2])
@@ -346,12 +346,11 @@ class SolidTrainer:
             loss_value = 0.0
             for inputs,targets,c_mask in test_data_loader:
                 inputs = inputs.to(device)
+                inputs = torch.unsqueeze(inputs,dim=1)
                 targets = F.one_hot(targets,num_classes=n_cls)
                 soft_labels = self.teacher.softmax_with_temperature(inputs,args.temperature)
                 targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
                 targets = targets.to(device)
-                # class_mask = (torch.rand(targets.shape[0]) < 0.15).to(device,torch.int32)
-                # c_mask = torch.ones_like(c_mask,device=device)
                 dloss, closs = self.diffusion.mixed_loss(inputs,targets,c_mask.to(torch.int32))
                 loss = args.dloss_weight * dloss + args.closs_weight * closs
                 loss_value += loss.item()
@@ -383,7 +382,7 @@ class SolidTrainer:
                 pbar.update(1)
                 if ckpt_save_epoch > 0 and (e+1) % ckpt_save_epoch == 0:
                     ts = datetime.now().strftime(timestamp_format)
-                    ckpt_path = osp.join(root_path, "ckpt","tabdiff",args.dataset,"tabdiff_" + args.dataset+"_"+ts+f"_e{e}_"+".pth")
+                    ckpt_path = osp.join(root_path, "ckpt","tabdiff",self.ctx.name,"tabdiff_" + self.ctx.name+"_"+ts+f"_e{e}_"+".pth")
                     VNG_utils.save(self.diffusion,ckpt_path)
                 if patience_count >= patience:
                     pbar.write(f"Early stopping at epoch {e+1}")

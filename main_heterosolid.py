@@ -158,7 +158,6 @@ for r in range(repeatition):
     emb_data = trainer.cent_pretrain(args)
     # cover data with initial embeddings
     trainer.cover_data_with_emb()
-
     trainer.train_teacher(epochs=args.epochs)
     trainer.train_diffusion(args)
 
