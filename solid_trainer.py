@@ -235,15 +235,15 @@ class SolidTrainer:
         
         teacher_model.train()
         teacher_optimizer.zero_grad()
-        inputs = self.data.x.to(self.device)
+        inputs = self.data[self.target].x.to(self.device)
         logits = teacher_model(inputs[self.data_train_mask])
-        loss = F.cross_entropy(logits,self.data.y[self.data_train_mask])
+        loss = F.cross_entropy(logits,self.data[self.target].y[self.data_train_mask])
         loss.backward()
         teacher_optimizer.step()
         with torch.no_grad():
             teacher_model.eval()
             logits = teacher_model(inputs[self.data_val_mask])
-            val_loss = F.cross_entropy(logits,self.data.y[self.data_val_mask])
+            val_loss = F.cross_entropy(logits,self.data[self.target].y[self.data_val_mask])
         return val_loss
     
     def train_teacher(self, epochs, skip = False, ckpt_path = None, ckpt_save_epoch = 0):
@@ -270,7 +270,7 @@ class SolidTrainer:
                 pbar.update(1)
                 if ckpt_save_epoch > 0 and ((e+1) % ckpt_save_epoch == 0):
                     ts = datetime.now().strftime(timestamp_format)
-                    path = osp.join(root_path, "ckpt","teacher",self.tabgraph.name,"teacher_" + self.tabgraph.name+"_"+ts+f"_e{e}_"+".pth")
+                    path = osp.join(root_path, "ckpt","teacher",self.ctx.name,"teacher_" + self.ctx.name+"_"+ts+f"_e{e}_"+".pth")
                     VNG_utils.save(self.teacher,path)
                 if patience_count >= patience:
                     pbar.write(f"Early stopping at epoch {e+1}")
