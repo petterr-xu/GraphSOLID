@@ -48,7 +48,7 @@ class SolidTrainer:
         self.encoder = encoder.to(device) if encoder else None
 
         self.minority_mask = minority_mask
-        # 5. 优化器初始化 (逻辑不变)
+        # 优化器初始化
         self.teacher_optimizer = torch.optim.Adam(self.teacher.parameters(), lr=tearch_lr)
         self.dif_optimizer = torch.optim.Adam(self.diffusion.parameters(), lr=diff_lr)
         self.de_optimizer = torch.optim.Adam(self.decoder.parameters(), lr=el_lr)
@@ -100,8 +100,8 @@ class SolidTrainer:
                 num_nodes=(self.data[src_type].num_nodes, self.data[dst_type].num_nodes),
                 num_neg_samples=pos_edge_index.size(1)
             )
-            pos_scores = self.decoder(emb_dict[src_type], emb_dict[dst_type], pos_edge_index)
-            neg_scores = self.decoder(emb_dict[src_type], emb_dict[dst_type], neg_edge_index)
+            pos_scores = self.decoder(emb_dict, pos_edge_index, edge_type)
+            neg_scores = self.decoder(emb_dict, neg_edge_index, edge_type)
             scores = torch.cat([pos_scores, neg_scores])
             labels = torch.cat([torch.ones(pos_scores.size(0)), torch.zeros(neg_scores.size(0))]).to(device)
             total_de_loss += F.binary_cross_entropy_with_logits(scores, labels)
@@ -129,9 +129,9 @@ class SolidTrainer:
                     num_nodes=(self.data[src_t].num_nodes, self.data[dst_t].num_nodes),
                     num_neg_samples=v_pos_edge.size(1)
                 )
-                v_pos_scores = self.decoder(v_emb_dict[src_t], v_emb_dict[dst_t], v_pos_edge)
-                v_neg_scores = self.decoder(v_emb_dict[src_t], v_emb_dict[dst_t], v_neg_edge)
-                
+                v_pos_scores = self.decoder(v_emb_dict, v_pos_edge, edge_type)
+                v_neg_scores = self.decoder(v_emb_dict, v_neg_edge, edge_type)
+
                 v_scores = torch.cat([v_pos_scores, v_neg_scores])
                 v_labels = torch.cat([torch.ones(v_pos_scores.size(0)), torch.zeros(v_neg_scores.size(0))]).to(device)
                 val_recon_loss += F.binary_cross_entropy_with_logits(v_scores, v_labels)
@@ -220,13 +220,25 @@ class SolidTrainer:
                 emb_data[ntype].x = embedding.detach()
             self.emb_data = emb_data
         return emb_data
-
+    
+    @DeprecationWarning
     def cover_data_with_emb(self):
         assert self.emb_data is not None, "Please run cent_pretrain() before calling this method."
         target = self.target
         new_embeddings = self.emb_data[target].x
         self.data[target].x = new_embeddings
         self.ctx.g[target].x = new_embeddings
+
+    def update_data(self, data):
+        assert data is not None, "Please run cent_pretrain() before calling this method."
+        self.data = data.to(self.device)
+        self.ctx.g = data.to(self.device)
+        self.edge_index_dict = self.data.edge_index_dict
+        self.data_train_mask = self.data[self.target].train_mask
+        self.data_val_mask = self.data[self.target].val_mask
+        self.data_test_mask = self.data[self.target].test_mask
+
+
         
         
     def train_teacher_oneloop(self):

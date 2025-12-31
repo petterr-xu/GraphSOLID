@@ -36,7 +36,6 @@ data = hetero_ctx.g.to(device)
 n_feat = hetero_ctx.n_features
 n_cls = hetero_ctx.n_classes
 print(data)
-ori_edge_index = data.edge_index
 
 repeatition = 1
 max_n=500
@@ -45,6 +44,30 @@ overall_mi_recall = []
 overall_ma_recall = []
 mi_recall = []
 ma_recall = []
+
+if args.dataset in ['YelpChi', 'Amazon-Products']:
+    data_train_mask, data_val_mask, data_test_mask = data[target].train_mask.clone(), data[target].val_mask.clone(), data[target].test_mask.clone()
+    stats = data[target].y[data_train_mask]
+    n_data = []
+    for i in range(n_cls):
+        data_num = (stats == i).sum()
+        n_data.append(int(data_num.item()))
+    idx_info = VNG_utils.get_idx_info(data[target].y, n_cls, data_train_mask)
+    class_num_list = n_data
+    print("num of class in original training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
+    class_num_list, data_train_mask, _, edge_mask_dict = graphbuilder.make_hetero_longtailed_data_remove(data, target, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
+    # 更新 HeteroData
+    hetero_ctx.g[hetero_ctx.target_node].train_mask = data_train_mask
+    # 更新边索引 (可选，取决于是否想物理删除边)
+    if not args.keep_edge:
+        for etype, mask in edge_mask_dict.items():
+            hetero_ctx.g[etype].edge_index = hetero_ctx.g[etype].edge_index[:, mask]
+    print("num of class in LT-training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
+    minority_mask = class_num_list < (sum(class_num_list)/n_cls)
+    minority_class = [i for i in range(n_cls) if minority_mask[i]]
+    print("minority classes {}".format(minority_class))
+else:
+    raise NotImplementedError("Not implemented for dataset {}".format(args.dataset))
 
 for r in range(repeatition):
     args.seed = args.seed + 1
@@ -57,32 +80,7 @@ for r in range(repeatition):
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    edge_index = copy.deepcopy(ori_edge_index)
-    if args.dataset in ['YelpChi', 'Amazon-Products']:
-        data_train_mask, data_val_mask, data_test_mask = data.train_mask.clone(), data.val_mask.clone(), data.test_mask.clone()
-        stats = data[target].y[data_train_mask]
-        n_data = []
-        for i in range(n_cls):
-            data_num = (stats == i).sum()
-            n_data.append(int(data_num.item()))
-        idx_info = VNG_utils.get_idx_info(data[target].y, n_cls, data_train_mask)
-        class_num_list = n_data
-        print("num of class in original training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
-        class_num_list, data_train_mask, _, edge_mask_dict = graphbuilder.make_hetero_longtailed_data_remove(data, target, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
-        # 更新 HeteroData
-        hetero_ctx.g[hetero_ctx.target_node].train_mask = data_train_mask
-        # 更新边索引 (可选，取决于是否想物理删除边)
-        if not args.keep_edge:
-            for etype, mask in edge_mask_dict.items():
-                hetero_ctx.g[etype].edge_index = hetero_ctx.g[etype].edge_index[:, mask]
-        print("num of class in LT-training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
-        minority_mask = class_num_list < (sum(class_num_list)/n_cls)
-        minority_class = [i for i in range(n_cls) if minority_mask[i]]
-        print("minority classes {}".format(minority_class))
-        print("number of edges {}".format(sum(train_edge_mask)))
-    else:
-        raise NotImplementedError("Not implemented for dataset {}".format(args.dataset))
-    encoder = HeteroNN.HeteroSAGE(hetero_ctx.g.metadata(), args.n_hid, num_layers=args.n_en_layers, dropout=0.6).to(device)
+    encoder = HeteroNN.HeteroSAGE(hetero_ctx.g.metadata(), args.n_hid, num_layers=args.n_en_layers).to(device)
     n_feat = args.n_hid
     teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
 
@@ -155,9 +153,10 @@ for r in range(repeatition):
                            minority_mask,
                            **train_args)
     
+    trainer.minority_mask = minority_mask
     emb_data = trainer.cent_pretrain(args)
     # cover data with initial embeddings
-    trainer.cover_data_with_emb()
+    trainer.update_data(emb_data)
     trainer.train_teacher(epochs=args.epochs)
     trainer.train_diffusion(args)
 
@@ -194,13 +193,7 @@ for r in range(repeatition):
     aug_data.val_mask = data_val_mask
     aug_data.test_mask = data_test_mask
     # update trainer data
-    trainer.aug_data = aug_data.to(device)
-    trainer.data_train_mask_aug = data_train_mask.to(device)
-    trainer.data_val_mask_aug = data_val_mask.to(device)
-    trainer.edge_index_aug = edge_index.to(device)
-    trainer.train_edge_mask_aug = train_edge_mask.to(device)
-    trainer.data_test_mask_aug = data_test_mask.to(device)
-    trainer.minority_mask = minority_mask
+    trainer.update_data(aug_data)
     # train gnn classifier on augmented graph
     best_val_acc, best_val_f1, test_acc, test_bacc, test_f1, best_measure, minority_recall, majority_recall = trainer.train_classifier_vanilla()
 
