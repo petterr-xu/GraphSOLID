@@ -232,11 +232,11 @@ class UNet(nn.Module):
 
         # Project image into feature map
         # self.vector_proj = nn.Conv1d(vector_channels, n_channels, kernel_size=3, padding=1)
-        # self.vector_proj = nn.Sequential(
-        #     nn.Linear(feature_length,n_length),
-        #     nn.Conv1d(in_channels=1,out_channels=n_channels,kernel_size=3,padding=1)
-        # )
-        self.vector_proj = MultiLinearLayer1d(feature_length,n_channels,n_length)
+        self.vector_proj = nn.Sequential(
+            nn.Linear(feature_length,n_length),
+            nn.Conv1d(in_channels=1,out_channels=n_channels,kernel_size=3,padding=1)
+        )
+        # self.vector_proj = MultiLinearLayer1d(feature_length,n_channels,n_length)
         # self.vector_proj = nn.Sequential(
         #     nn.Linear(feature_length,n_length),
         #     nn.Conv1d(in_channels=1,out_channels=n_channels,kernel_size=3,padding=1)
@@ -293,7 +293,10 @@ class UNet(nn.Module):
         # Final normalization and convolution layer
         self.norm = nn.GroupNorm(8, n_channels)
         self.act = Swish()
-        self.final = nn.Conv1d(in_channels, 1, kernel_size=3, padding=1)
+        self.final = nn.Sequential(
+            nn.Conv1d(in_channels,out_channels=1,kernel_size=3,padding=1),
+            nn.Linear(n_length,feature_length)
+        )
         # self.final = nn.Linear(n_length*in_channels,feature_length)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, class_: torch.Tensor, class_mask:torch.Tensor):
@@ -306,9 +309,9 @@ class UNet(nn.Module):
         batch_size = x.shape[0]
         t = self.time_emb(t)
         # 随机mask掉一些样本的类型引导，通过这一步使模型同时具有条件生成和无条件生成的能力
-        class_mask = class_mask[:, None]
-        class_mask = class_mask.repeat(1,self.num_class)
-        class_mask = (-1*(1-class_mask))
+        # class_mask = class_mask[:, None]
+        # class_mask = class_mask.repeat(1,self.num_class)
+        # class_mask = (-1*(1-class_mask))
 
         # # 注意数据是否需要进行onehot编码
         # class_ = nn.functional.one_hot(class_, num_classes=self.num_class)

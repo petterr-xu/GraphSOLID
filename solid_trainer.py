@@ -333,7 +333,7 @@ class SolidTrainer:
             measure_result = classification_report(y_true, y_pred,digits=4, zero_division=np.nan)
         return acc, f1, recall, measure_result
     
-    def train_tabdiff_oneloop(self,args):
+    def train_diff_oneloop(self,args):
         device = self.device
         n_cls = self.ctx.n_classes
         train_feat_data = self.data[self.target].x[self.data_train_mask]
@@ -357,6 +357,7 @@ class SolidTrainer:
             # print(inputs.shape)
             self.dif_optimizer.zero_grad()
             targets = targets.to(device)
+            # 去噪前调整inputs的维度
             inputs = torch.unsqueeze(inputs,dim=1)
             # 按照一定的概率将guidance置空，由此只用一个backbone训练出适用于两种情况（有无条件）的模型
             loss = self.diffusion.loss(inputs,targets,c_mask.to(torch.int32),args.padding)
@@ -364,6 +365,8 @@ class SolidTrainer:
             self.dif_optimizer.step()
             loss_value += loss.item()
         val_class_mask = VNG_utils.dis_based_class_mask(eval_label,class_dis,n_cls,eval_label.shape[0],args.guidance_drop_prob,adjustment_factor=args.adjustment_factor,device=device)
+        val_class_mask = val_class_mask[:, None].repeat(1,n_cls).to(torch.int32)
+        val_class_mask = (-1*(1-val_class_mask))
         eval_data = [eval_feat,eval_label,val_class_mask.to(torch.int32)]
         val_loss = self.eval_diffusion_model(eval_data,args)
         return val_loss
@@ -380,13 +383,12 @@ class SolidTrainer:
             loss_value = 0.0
             for inputs,targets,c_mask in test_data_loader:
                 inputs = inputs.to(device)
-                inputs = torch.unsqueeze(inputs,dim=1)
                 targets = F.one_hot(targets,num_classes=n_cls)
                 soft_labels = self.teacher.softmax_with_temperature(inputs,args.temperature)
                 targets = soft_labels * (1. - args.hard_factor) + targets * args.hard_factor
                 targets = targets.to(device)
-                dloss, closs = self.diffusion.mixed_loss(inputs,targets,c_mask.to(torch.int32))
-                loss = args.dloss_weight * dloss + args.closs_weight * closs
+                inputs = torch.unsqueeze(inputs,dim=1)
+                loss = self.diffusion.loss(inputs,targets,c_mask.to(torch.int32), args.padding)
                 loss_value += loss.item()
         return loss_value / data_size
     
@@ -403,7 +405,7 @@ class SolidTrainer:
         dif_epoch = 1000
         with tqdm(total=dif_epoch, desc="Diffusion Training") as pbar:
             for e in range(dif_epoch):
-                val_loss = self.train_tabdiff_oneloop(args)
+                val_loss = self.train_diff_oneloop(args)
                 if val_loss < (best_loss - patience_beta):
                     best_loss = val_loss
                     patience_count = 0
