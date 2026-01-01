@@ -53,6 +53,7 @@ def parse_args():
     parser.add_argument('--is_attn', type=tuple, default=(False, True, True), help='attention mechanism')
     parser.add_argument('--ch_mults', type=tuple, default=(1, 2, 4))
     parser.add_argument('--n_blocks', type=int, default=3, help='number of block of up and down sample in unet')
+    parser.add_argument('--is_beta_sampling', action='store_false', help='use beta sampling strategy for diffusion training')
 
     ## tabdiff setup
     parser.add_argument('--dloss_weight', type=float, default=1.0, help='weight for discrate loss weight')

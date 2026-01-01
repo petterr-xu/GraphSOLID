@@ -59,7 +59,7 @@ class GDDPMblock(nn.Module):
         mean, var = self.q_xt_x0(x0, t)
         return mean + (var ** 0.5) * eps
     
-    def condition_guide(self, classifier_model:list, classifier_scale, xt: torch.tensor,t,y=None):
+    def classifier_guide(self, classifier_model:list, classifier_scale, xt: torch.tensor,t,y=None):
         assert y is not None
         with torch.enable_grad():
             x_in = xt.detach().requires_grad_(True)
@@ -77,7 +77,7 @@ class GDDPMblock(nn.Module):
             # selected = log_probs[range(len(logits)), y.view(-1)]
             # return torch.autograd.grad(selected.sum(), x_in)[0] * self.classifier_scale
 
-    def p_sample(self,classifier_model:list,classifier_scale, guidance_scale, xt: torch.Tensor, t: torch.Tensor,y):
+    def p_sample(self, guidance_scale, xt: torch.Tensor, t: torch.Tensor,y):
         with torch.no_grad(): # 停止记录梯度，避免爆显存
             # if y.dim() > 1:
             #     nodes_class = torch.argmax(y,dim=y.dim()-1)
@@ -102,16 +102,12 @@ class GDDPMblock(nn.Module):
             eps_coef = (1 - alpha) / (1 - alpha_bar) ** .5
             mean = 1 / (alpha ** 0.5) * (xt - eps_coef * eps_theta)
             var = gather(self.sigma2, t)
-            if classifier_scale != 0:
-                cond_grad = self.condition_guide(classifier_model,classifier_scale,xt,t,y)
-                mean_cond = mean+var*cond_grad
-            else:
-                mean_cond = mean
+            mean_cond = mean
             eps = torch.randn(xt.shape, device=xt.device)
             # del eps_theta
         return mean_cond + (var ** .5) * eps
     
-    def sampling(self,classifier_model,classifier_scale_mode,guidance_scale,x_t:torch.Tensor,y:torch.Tensor, padding,save_frames,device):
+    def sampling(self,classifier_model,classifier_scale_mode,guidance_scale,x_t:torch.Tensor,y:torch.Tensor, padding=(0,0,0,0),save_frames=False,device="cuda:0"):
         """采样生成
         Args:
             classifier_model (list): 引导用的分类器=[classifier,loss_fun,classifier_loss_beta]

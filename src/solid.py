@@ -7,7 +7,118 @@ from torch_scatter import scatter_add
 
 from .utils import VNG_utils
 MAX_SAMPLING_SIZE = 500
+
 @torch.no_grad()
+def softlabel_based_hard_nodes_sampling(x:torch.tensor,y,n_cls,diffusion_model,teacher, args, device="cuda:0"):
+
+    # 预处理
+    x = x.to(device)
+    y = y.to(device)
+
+    soft_labels = teacher.softmax_with_temperature(x, args.temperature)   # (N, C)
+    hard_labels = y
+
+    dis = VNG_utils.class_dis(y, n_cls)
+    max_size = torch.max(dis)
+
+    # 计算每类 augment 数量
+    aug_size = dis.clone()
+    if args.aug_mode == "ratio":
+        aug_size[aug_size == max_size] = 0
+        f_size = aug_size * (args.over_sample_rate + 1)
+        aug_size = torch.clamp(f_size, max=max_size) - aug_size
+    elif args.aug_mode == "mean":
+        avrg = torch.sum(dis) // n_cls
+        aug_size = avrg - aug_size
+        aug_size[aug_size < 0] = 0
+    elif args.aug_mode == "max":
+        aug_size = max_size - aug_size
+        aug_size[aug_size < 0] = 0
+    else:
+        raise ValueError(f"Undefined aug_mode={args.aug_mode}")
+    all_guidances = []
+    all_labels = []
+    all_src_indices = []
+    # collect guidance and source indices
+    for cls, cls_aug_size in enumerate(aug_size):
+        cls_aug_size = int(cls_aug_size)
+        if cls_aug_size == 0:
+            continue
+
+        print(f"Generating {cls_aug_size} samples for class {cls}")
+
+        node_classes = torch.full([cls_aug_size], cls, device=device)
+
+        # ------- hard sample selection -------
+        cls_mask = (hard_labels == cls)
+        cls_indices = torch.nonzero(cls_mask, as_tuple=True)[0]
+
+        nodes_confidence = 1 - soft_labels[cls_mask][:, cls]  # shape: (#cls_samples,)
+
+        if (args.hard_factor == 1.):
+            k = (cls_mask.sum().item() + 1) // 2
+            _, idx_sel = torch.topk(nodes_confidence, k)
+        else:
+            idx_sel = torch.arange(cls_mask.sum(), device=device)
+
+        src_indices = cls_indices[idx_sel]
+        hard_samples = soft_labels[cls_mask][idx_sel]   # (K, C)
+
+        # --------- confidence guidance ---------
+        if args.is_beta_sampling:
+            mean_conf = hard_samples.mean(dim=0)
+            var_conf = mean_conf / 100
+
+            alpha = mean_conf * (mean_conf * (1 - mean_conf) / var_conf - 1)
+            beta =  (1 - mean_conf) * (mean_conf * (1 - mean_conf) / var_conf - 1)
+
+            conf_sample = torch.distributions.Beta(alpha, beta).sample((cls_aug_size,)).to(device)
+            conf_guid = conf_sample / conf_sample.sum(dim=1, keepdim=True)
+        else:
+            random_idx = torch.randint(0, hard_samples.shape[0]-1, (cls_aug_size,))
+            conf_guid = hard_samples[random_idx]
+
+        # mix hard and soft
+        overall_guidance = conf_guid * (1 - args.hard_factor) + \
+                           F.one_hot(node_classes, n_cls) * args.hard_factor
+        all_guidances.append(overall_guidance)
+        all_labels.append(node_classes)
+        all_src_indices.append(src_indices)
+
+    if len(all_guidances) == 0:
+        return None, None
+
+    all_guidances = torch.cat(all_guidances, dim=0)     # (Total, C)
+    all_labels = torch.cat(all_labels, dim=0)           # (Total,)
+    all_src_indices = torch.cat(all_src_indices, dim=0)
+
+    total = all_guidances.size(0)
+    print(f"\nTotal nodes to generate = {total}")
+    n_emb = x.shape[1]
+    x_t = torch.randn([total,1,n_emb]).to(device)
+    # batch sampling
+    if total <= MAX_SAMPLING_SIZE:
+        x0,_ = diffusion_model.sampling(guidance_scale=args.guidance_scale,x_t=x_t,y=all_guidances,device=device)
+    else:
+        chunks = []
+        for i in range(0, total, MAX_SAMPLING_SIZE):
+            g = all_guidances[i: i + MAX_SAMPLING_SIZE]
+            out,_ = diffusion_model.sampling(guidance_scale=args.guidance_scale
+                                                ,x_t=x_t[i: i + MAX_SAMPLING_SIZE],y=g[i: i + MAX_SAMPLING_SIZE],device=device)
+                
+            chunks.append(out)
+        x0 = torch.cat(chunks, dim=0)
+
+    v_info = {
+        "feat": torch.detach(x0),
+        "label": torch.detach(all_labels.to(y.dtype))
+    }
+
+    torch.cuda.empty_cache()
+    return v_info, all_src_indices
+
+@torch.no_grad()
+@DeprecationWarning
 def softlabel_based_hard_nodes_tab_sampling(x:torch.tensor,y,n_cls,diffusion_model,teacher,temperature,guidance_scale=1.0, hard_factor = 0.5, aug_mode = "ratio", over_sample_rate = 1, is_hard_sample = True, is_beta_sampling = True,device="cuda:0"):
 
     # 预处理
@@ -122,98 +233,98 @@ def softlabel_based_hard_nodes_tab_sampling(x:torch.tensor,y,n_cls,diffusion_mod
     torch.cuda.empty_cache()
     return v_info, all_src_indices
 
-@torch.no_grad()
-def softlabel_based_hard_nodes_sampling(x:torch.tensor,y,n_cls,diffusion_model,teacher,temperature, padding,guidance=7.5, hard_factor = 0.5, aug_mode = "ratio", over_sample_rate = 1, is_hard_sample = True, is_beta_sampling = True,device="cuda:0"):
-    dis = VNG_utils.class_dis(y,n_cls)
-    x = F.pad(x,pad=padding,mode="constant",value=0).to(device)
-    n_emb = x.shape[1]
-    soft_labels = teacher.softmax_with_temperature(x,temperature)
-    hard_labels = y
-    max_size = torch.max(dis)
-    aug_size = copy.deepcopy(dis)
-    if aug_mode == "ratio":
-        assert over_sample_rate is not None, "If aug_mode is \"ratio\" then over_sample_rate must be given."
-        aug_size[aug_size == max_size] = 0
-        f_size = torch.tensor(aug_size*(over_sample_rate + 1),dtype=torch.int32)
-        aug_size = torch.clip(f_size,max=max_size)-aug_size
-    elif aug_mode == "mean":
-        avrg = torch.sum(dis) // (n_cls)
-        aug_size = avrg - aug_size
-        aug_size[aug_size < 0] = 0
-    elif aug_mode == "max":
-        aug_size = max_size = aug_size
-    else:
-        raise ValueError("undefined \"aug_mode\"={}".format(aug_mode))
+# @torch.no_grad()
+# def softlabel_based_hard_nodes_sampling(x:torch.tensor,y,n_cls,diffusion_model,teacher,temperature, padding,guidance=7.5, hard_factor = 0.5, aug_mode = "ratio", over_sample_rate = 1, is_hard_sample = True, is_beta_sampling = True,device="cuda:0"):
+#     dis = VNG_utils.class_dis(y,n_cls)
+#     x = F.pad(x,pad=padding,mode="constant",value=0).to(device)
+#     n_emb = x.shape[1]
+#     soft_labels = teacher.softmax_with_temperature(x,temperature)
+#     hard_labels = y
+#     max_size = torch.max(dis)
+#     aug_size = copy.deepcopy(dis)
+#     if aug_mode == "ratio":
+#         assert over_sample_rate is not None, "If aug_mode is \"ratio\" then over_sample_rate must be given."
+#         aug_size[aug_size == max_size] = 0
+#         f_size = torch.tensor(aug_size*(over_sample_rate + 1),dtype=torch.int32)
+#         aug_size = torch.clip(f_size,max=max_size)-aug_size
+#     elif aug_mode == "mean":
+#         avrg = torch.sum(dis) // (n_cls)
+#         aug_size = avrg - aug_size
+#         aug_size[aug_size < 0] = 0
+#     elif aug_mode == "max":
+#         aug_size = max_size = aug_size
+#     else:
+#         raise ValueError("undefined \"aug_mode\"={}".format(aug_mode))
 
-    # aug_size = aug_size * confidence_filter_ratio
-    # assert confidence_filter_ratio > 1, "parameter confidence_filter_ratio must larger than 1"
-    x0 = torch.tensor([],device=device)
-    labels = torch.tensor([],device=device)
-    sampling_src_idx = torch.tensor([],device=device)
-    for class_,class_aug_size in enumerate(aug_size):
-        if class_aug_size == 0 : continue
-        print("Generating {} samples for class{}".format(int(class_aug_size),class_))
-        node_classes = torch.full([int(class_aug_size)],fill_value=class_,device=device)
-        # filter hard sample
-        class_mask = (hard_labels == class_)
-        class_indices = torch.nonzero(class_mask, as_tuple=True)[0]
-        nodes_confidence = 1-torch.index_select(soft_labels[class_mask], dim = 1, index=torch.tensor(class_,device=device)).view(-1)
-        if is_hard_sample:
-            _,indices = torch.topk(nodes_confidence,(sum(class_mask) + 1)//2)
-        else:
-            indices = torch.ones((sum(class_mask),),dtype=torch.bool)
-        src_indices = class_indices[indices]
-        hard_samples = soft_labels[class_mask][indices]
-        if is_beta_sampling:
-            mean_confidence = torch.mean(hard_samples,dim=0)
-            variance_confidence = mean_confidence / 100
-            # print("mean ", mean_confidence)
-            # print("var ", variance_confidence)
-            # assume that confidence follow Beta districution
-            alpha = mean_confidence * (mean_confidence * (1 - mean_confidence) / variance_confidence - 1)
-            beta_param = (1 - mean_confidence) * (mean_confidence * (1 - mean_confidence) / variance_confidence - 1)
-            # print("alpha ", alpha)
-            # print("beta ", beta_param)
-            confidence_sample = torch.distributions.Beta(alpha, beta_param).sample((class_aug_size,)).to(device)
-            confidence_guidance = confidence_sample / torch.sum(confidence_sample,dim=1,keepdim=True)
-        else:
-            random_indices = torch.randint(0, hard_samples.shape[0]-1, (class_aug_size,))
-            confidence_guidance = hard_samples[random_indices]
-        # print(confidence_guidance)
+#     # aug_size = aug_size * confidence_filter_ratio
+#     # assert confidence_filter_ratio > 1, "parameter confidence_filter_ratio must larger than 1"
+#     x0 = torch.tensor([],device=device)
+#     labels = torch.tensor([],device=device)
+#     sampling_src_idx = torch.tensor([],device=device)
+#     for class_,class_aug_size in enumerate(aug_size):
+#         if class_aug_size == 0 : continue
+#         print("Generating {} samples for class{}".format(int(class_aug_size),class_))
+#         node_classes = torch.full([int(class_aug_size)],fill_value=class_,device=device)
+#         # filter hard sample
+#         class_mask = (hard_labels == class_)
+#         class_indices = torch.nonzero(class_mask, as_tuple=True)[0]
+#         nodes_confidence = 1-torch.index_select(soft_labels[class_mask], dim = 1, index=torch.tensor(class_,device=device)).view(-1)
+#         if is_hard_sample:
+#             _,indices = torch.topk(nodes_confidence,(sum(class_mask) + 1)//2)
+#         else:
+#             indices = torch.ones((sum(class_mask),),dtype=torch.bool)
+#         src_indices = class_indices[indices]
+#         hard_samples = soft_labels[class_mask][indices]
+#         if is_beta_sampling:
+#             mean_confidence = torch.mean(hard_samples,dim=0)
+#             variance_confidence = mean_confidence / 100
+#             # print("mean ", mean_confidence)
+#             # print("var ", variance_confidence)
+#             # assume that confidence follow Beta districution
+#             alpha = mean_confidence * (mean_confidence * (1 - mean_confidence) / variance_confidence - 1)
+#             beta_param = (1 - mean_confidence) * (mean_confidence * (1 - mean_confidence) / variance_confidence - 1)
+#             # print("alpha ", alpha)
+#             # print("beta ", beta_param)
+#             confidence_sample = torch.distributions.Beta(alpha, beta_param).sample((class_aug_size,)).to(device)
+#             confidence_guidance = confidence_sample / torch.sum(confidence_sample,dim=1,keepdim=True)
+#         else:
+#             random_indices = torch.randint(0, hard_samples.shape[0]-1, (class_aug_size,))
+#             confidence_guidance = hard_samples[random_indices]
+#         # print(confidence_guidance)
 
-        overall_guidance = confidence_guidance * (1-hard_factor) + F.one_hot(node_classes,n_cls) * hard_factor
-        x_t = torch.randn([class_aug_size,1,n_emb]).to(device)
-        if MAX_SAMPLING_SIZE < 500:
-            x0_v,_ = diffusion_model.sampling([None,None],classifier_scale_mode=0,guidance_scale=guidance
-                                                ,x_t=x_t,y=overall_guidance,padding=padding,save_frames=False,device=device)
-        else:
-            x0_v = []
-            for step in range(0,class_aug_size // MAX_SAMPLING_SIZE+1):
-                begin = step * MAX_SAMPLING_SIZE
-                end = (step + 1) * MAX_SAMPLING_SIZE if (step + 1) * MAX_SAMPLING_SIZE < class_aug_size else class_aug_size
-                x0_b,_ = diffusion_model.sampling([None,None],classifier_scale_mode=0,guidance_scale=guidance
-                                                ,x_t=x_t[begin:end],y=overall_guidance[begin:end],padding=padding,save_frames=False,device=device)
-                x0_v.append(x0_b)
-            x0_v = torch.cat(x0_v, dim=0)
+#         overall_guidance = confidence_guidance * (1-hard_factor) + F.one_hot(node_classes,n_cls) * hard_factor
+#         x_t = torch.randn([class_aug_size,1,n_emb]).to(device)
+#         if MAX_SAMPLING_SIZE < 500:
+#             x0_v,_ = diffusion_model.sampling([None,None],classifier_scale_mode=0,guidance_scale=guidance
+#                                                 ,x_t=x_t,y=overall_guidance,padding=padding,save_frames=False,device=device)
+#         else:
+#             x0_v = []
+#             for step in range(0,class_aug_size // MAX_SAMPLING_SIZE+1):
+#                 begin = step * MAX_SAMPLING_SIZE
+#                 end = (step + 1) * MAX_SAMPLING_SIZE if (step + 1) * MAX_SAMPLING_SIZE < class_aug_size else class_aug_size
+#                 x0_b,_ = diffusion_model.sampling([None,None],classifier_scale_mode=0,guidance_scale=guidance
+#                                                 ,x_t=x_t[begin:end],y=overall_guidance[begin:end],padding=padding,save_frames=False,device=device)
+#                 x0_v.append(x0_b)
+#             x0_v = torch.cat(x0_v, dim=0)
             
-        # print("generated node feature quility:")
-        # logits = teacher(torch.detach(x0_v).squeeze(1))
-        # preds = logits.argmax(1)
-        # print(preds)
-        if x0.numel() == 0:
-            x0 = copy.deepcopy(x0_v)
-            labels = copy.deepcopy(node_classes)
-            sampling_src_idx = copy.deepcopy(src_indices)
-        else:
-            x0 = torch.concat([x0,x0_v],dim=0)
-            labels = torch.concat([labels,node_classes],dim=0)
-            sampling_src_idx = torch.concat([sampling_src_idx,src_indices],dim=0)
+#         # print("generated node feature quility:")
+#         # logits = teacher(torch.detach(x0_v).squeeze(1))
+#         # preds = logits.argmax(1)
+#         # print(preds)
+#         if x0.numel() == 0:
+#             x0 = copy.deepcopy(x0_v)
+#             labels = copy.deepcopy(node_classes)
+#             sampling_src_idx = copy.deepcopy(src_indices)
+#         else:
+#             x0 = torch.concat([x0,x0_v],dim=0)
+#             labels = torch.concat([labels,node_classes],dim=0)
+#             sampling_src_idx = torch.concat([sampling_src_idx,src_indices],dim=0)
             
-    virtual_feat = x0.squeeze(1)
-    v_information = {"feat":torch.detach(virtual_feat),"label":torch.detach(labels.to(y.dtype))}
+#     virtual_feat = x0.squeeze(1)
+#     v_information = {"feat":torch.detach(virtual_feat),"label":torch.detach(labels.to(y.dtype))}
 
-    torch.cuda.empty_cache()
-    return v_information,sampling_src_idx
+#     torch.cuda.empty_cache()
+#     return v_information,sampling_src_idx
 
 def isolate_sampling_test(x,y,class_,n_cls,diffusion_model,teacher,temperature, aug_size , padding,guidance=7.5, hard_factor = 0.5, is_hard_sample = True,device="cuda:0"):
     n_emb = x.shape[1]

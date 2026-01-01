@@ -163,18 +163,14 @@ for r in range(repeatition):
     trainer.train_teacher(epochs=args.epochs)
     trainer.train_diffusion(args,ckpt_save_epoch=0)
 
-    data = emb_data.to(device)
-    v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],
-                                                        data.y[data_train_mask],
+    emb_data = emb_data.to(device)
+    v_information, src_idx = solid.softlabel_based_hard_nodes_sampling(emb_data[hetero_ctx.target].x[data_train_mask],
+                                                        emb_data[hetero_ctx.target].y[data_train_mask],
                                                         n_cls,
                                                         diffusion_model = diffusion_model,
                                                         teacher = teacher_model,
-                                                        temperature = args.temperature,
-                                                        guidance_scale = args.guidance,
-                                                        hard_factor = args.hard_factor,
-                                                        aug_mode = args.aug_mode,
-                                                        is_hard_sample = (args.hard_factor == 1.),
-                                                        is_beta_sampling = False)
+                                                        args = args,
+                                                        device=device)
     
     # construct new nodes and edges then augment the graph
     new_node_num = v_information['feat'].shape[0]
