@@ -178,19 +178,12 @@ for r in range(repeatition):
     _, _, _, report_on_gen_samples = trainer.teacher_test(v_information['feat'], v_information['label'])
     print("Performance on generated samples: ", report_on_gen_samples)
 
-    aug_data, edge_index, data_train_mask, train_edge_mask = solid.add_new_nodes(data,
-                                                                    v_information['feat'],
-                                                                    v_information['label'],
-                                                                    edge_decoder,
-                                                                    edge_index,
-                                                                    data_train_mask,
-                                                                    train_edge_mask,
-                                                                    device=device)
-    data_val_mask = torch.cat([data_val_mask, torch.zeros(new_node_num, dtype=torch.bool, device=device)])
-    data_test_mask = torch.cat([data_test_mask, torch.zeros(new_node_num, dtype=torch.bool, device=device)])
-    aug_data.train_mask = data_train_mask
-    aug_data.val_mask = data_val_mask
-    aug_data.test_mask = data_test_mask
+    aug_data = solid.add_new_hetero_nodes_all_relations(data,
+                                                        v_information['feat'],
+                                                        v_information['label'],
+                                                        edge_decoder,
+                                                        target=hetero_ctx.target_node,
+                                                        device=device)
     # update trainer data
     trainer.update_data(aug_data)
     # train gnn classifier on augmented graph

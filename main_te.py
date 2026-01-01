@@ -413,7 +413,7 @@ for r in range(repeatition):
             
             new_node_num = v_information['feat'].shape[0]
             print("{} new nodes".format(new_node_num))
-            aug_data, edge_index, data_train_mask, train_edge_mask = solid.add_new_nodes(emb_data,
+            aug_data, edge_index, data_train_mask, train_edge_mask = solid.add_new_homo_nodes(emb_data,
                                                                             v_information['feat'],
                                                                             v_information['label'],
                                                                             decoder,

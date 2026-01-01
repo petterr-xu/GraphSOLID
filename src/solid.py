@@ -359,10 +359,135 @@ def isolate_sampling_test(x,y,class_,n_cls,diffusion_model,teacher,temperature, 
     logits = teacher(torch.detach(x0_v).squeeze(1))
     preds = logits.argmax(1)
     print(preds)
-    
 
 @torch.no_grad()
-def add_new_nodes(data, feats, labels, edge_predicter, edge_index, data_train_mask, train_edge_mask, device='cuda:0'):
+def add_new_hetero_nodes_all_relations(data, feats, labels, edge_predicter, target_node, device='cuda:0'):
+    """
+    自动识别 target_node 涉及的所有关系，并为其建立连接。
+    """
+    # 识别所有相关的 edge_types
+    # 只要 target_node 出现在三元组的 [0] (src) 或 [2] (dst)，我们就认为它是相关关系
+    related_edge_types = [
+        etype for etype in data.edge_types 
+        if etype[0] == target_node or etype[2] == target_node
+    ]
+    
+    print(f"Detected {len(related_edge_types)} relations for {target_node}: {related_edge_types}")
+
+    # 先更新节点自身的特征和标签 (只执行一次)
+    # 此时 data 会被更新，后续各关系连边时会基于这个更新后的 data
+    new_node_num = feats.size(0)
+    ori_num = data[target_node].num_nodes
+    
+    # 深度拷贝一份用于操作，避免污染原始输入
+    data = copy.deepcopy(data)
+    
+    data[target_node].x = torch.cat([data[target_node].x, feats.to(device)], dim=0)
+    data[target_node].y = torch.cat([data[target_node].y, labels.to(device)], dim=0)
+    data[target_node].train_mask = torch.cat([
+        data[target_node].train_mask, 
+        torch.ones(new_node_num, dtype=torch.bool, device=device)
+    ])
+    data[target_node].val_mask = torch.cat([
+        data[target_node].val_mask, 
+        torch.zeros(new_node_num, dtype=torch.bool, device=device)])
+    data[target_node].test_mask = torch.cat([
+        data[target_node].test_mask, 
+        torch.zeros(new_node_num, dtype=torch.bool, device=device)])
+
+    # 遍历每一个关系进行“局部连边”
+    for etype in related_edge_types:
+        print(f"   -> Processing relation: {etype}...")
+        data = _connect_single_relation(data, ori_num, new_node_num, labels, edge_predicter, etype, device)
+        
+    return data
+
+def _connect_single_relation(data, ori_num, new_node_num, new_labels, edge_predicter, edge_type, device):
+    src_type, rel, dst_type = edge_type
+    
+    # 确定候选目标节点的范围
+    if src_type == dst_type:
+        # 如果是同类关系（如 rur），我们只让新节点连向“原始节点”
+        # 避免新节点之间互相建立没有根据的连接
+        num_dst_nodes = ori_num
+    else:
+        # 如果是异类关系（如 r-u, r-i），目标节点类型的所有节点都是候选
+        num_dst_nodes = data[dst_type].num_nodes
+
+    # 构造目标候选索引 [0, 1, ..., num_dst_nodes - 1]
+    candidate_dst_indices = torch.arange(num_dst_nodes, device=device)
+
+    # 2. 获取 z_dict (用于 predicter)
+    z_dict = {ntype: data[ntype].x for ntype in data.node_types}
+    
+    # 3. 统计度分布 (用于采样连边数 d)
+    curr_edge_index = data[edge_type].edge_index
+    col = curr_edge_index[1]
+    # 注意：这里的 dim_size 必须是该关系目标类型的总节点数
+    degree = scatter_add(torch.ones_like(col), col, dim=0, dim_size=data[dst_type].num_nodes)
+    
+    new_edges_src = []
+    new_edges_dst = []
+    edge_predicter.eval()
+
+    # 连边循环
+    for i in range(new_node_num):
+        new_idx = ori_num + i
+        
+        # 确定连边数 d
+        if src_type == dst_type:
+            ref_mask = (data[dst_type].y[:ori_num] == new_labels[i])
+            c_degree = degree[:ori_num][ref_mask]
+        else:
+            c_degree = degree[:num_dst_nodes]
+            
+        if c_degree.numel() == 0 or c_degree.max() == 0:
+            d = 2 
+        else:
+            degree_dist = torch.bincount(c_degree.to(torch.long), minlength=int(c_degree.max().item()) + 1)
+            d = torch.multinomial(degree_dist.to(dtype=torch.float32), 1).item()
+            d = max(d, 1)
+
+        # 构造全连接候选边进行打分
+        # candidate_edges 形状: [2, num_dst_nodes]
+        candidate_edges = torch.stack([
+            torch.full((num_dst_nodes,), new_idx, dtype=torch.long, device=device),
+            candidate_dst_indices
+        ], dim=0)
+        
+        # 利用 predicter.forward 计算得分
+        scores = edge_predicter(z_dict, candidate_edges, edge_type)
+        
+        # 筛选 Top-K
+        k = min(4 * d, num_dst_nodes)
+        # top_scores: 前 k 个最高分, top_idx_in_candidate: 对应的索引
+        top_scores, top_idx_in_candidate = torch.topk(scores, k)
+        
+        # 将得分转化为采样概率
+        # temperature (温度系数) 可以控制分布的“平滑”程度：
+        # temp 越小，高分节点越容易被选中（趋向于 Argmax）
+        # temp 越大，分布越均匀（趋向于 随机采样）
+        temperature = 1.0 
+        sampling_weights = torch.softmax(top_scores / temperature, dim=0)
+        
+        # 4. 根据权重进行不放回采样 (replacement=False)
+        sel_idx = torch.multinomial(sampling_weights, d, replacement=False)
+        
+        # 5. 获取最终的目标节点索引
+        sampled_dst_nodes = candidate_dst_indices[top_idx_in_candidate[sel_idx]]
+        
+        new_edges_src.append(torch.full((d,), new_idx, dtype=torch.long, device=device))
+        new_edges_dst.append(sampled_dst_nodes)
+
+    # 物理合并边
+    if new_edges_src:
+        new_edge_index = torch.stack([torch.cat(new_edges_src), torch.cat(new_edges_dst)], dim=0)
+        data[edge_type].edge_index = torch.cat([data[edge_type].edge_index, new_edge_index], dim=1)
+        
+    return data
+
+@torch.no_grad()
+def add_new_homo_nodes(data, feats, labels, edge_predicter, edge_index, data_train_mask, train_edge_mask, device='cuda:0'):
     rand_factor = 4
     new_node_num = feats.size(0)
     data = copy.deepcopy(data)
