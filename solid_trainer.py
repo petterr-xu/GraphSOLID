@@ -418,7 +418,7 @@ class SolidTrainer:
                 pbar.update(1)
                 if ckpt_save_epoch > 0 and (e+1) % ckpt_save_epoch == 0:
                     ts = datetime.now().strftime(timestamp_format)
-                    ckpt_path = osp.join(root_path, "ckpt","tabdiff",self.ctx.name,"tabdiff_" + self.ctx.name+"_"+ts+f"_e{e}_"+".pth")
+                    ckpt_path = osp.join(root_path, "ckpt","diffusion",self.ctx.name,"diffusion_" + self.ctx.name+"_"+ts+f"_e{e}_"+".pth")
                     VNG_utils.save(self.diffusion,ckpt_path)
                 if patience_count >= patience:
                     pbar.write(f"Early stopping at epoch {e+1}")

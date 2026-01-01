@@ -36,7 +36,7 @@ def parse_args():
     parser.add_argument('--raw_space', action='store_true', help='use raw node feature for diffusion generation, instead lantent embedding.')
     parser.add_argument('--dif_lr', type=float, default=1e-4, help='learning rate for diffusion model')
     parser.add_argument('--padding', type=tuple, default=(0,0,0,0), help='padding for node features to avoid resolution mismatch caused by odd latitudes in unet downsampling')
-    parser.add_argument('--T', type=int, default=1000, help='time steps for diffusion process')
+    parser.add_argument('--T', type=int, default=1500, help='time steps for diffusion process')
     parser.add_argument('--beta_bound', type=tuple, default=(1e-4, 2e-2), help='lower bound and upper bound of beta')
     parser.add_argument('--beta_schedule', type=str, default='lin', help='beta schedule')
     parser.add_argument('--batch_size', type=int, default=64, help='batch size of diffusion model')

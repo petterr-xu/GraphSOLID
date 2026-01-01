@@ -157,11 +157,11 @@ for r in range(repeatition):
         "encoder": "/home/xvwenduan/GraphSOLID/ckpt/encoder/YelpChi/encoder_YelpChi_20251231_190604_e109_.pth",
         "decoder": "/home/xvwenduan/GraphSOLID/ckpt/decoder/YelpChi/decoder_YelpChi_20251231_190604_e109_.pth"
     }
-    emb_data = trainer.cent_pretrain(args, skip=True, ckpt_path=cktp_path, ckpt_save_epoch=10)
+    emb_data = trainer.cent_pretrain(args, skip=True, ckpt_path=cktp_path, ckpt_save_epoch=0)
     # cover data with initial embeddings
     trainer.update_data(emb_data)
     trainer.train_teacher(epochs=args.epochs)
-    trainer.train_diffusion(args,ckpt_save_epoch=10)
+    trainer.train_diffusion(args,ckpt_save_epoch=0)
 
     data = emb_data.to(device)
     v_information, src_idx = solid.softlabel_based_hard_nodes_tab_sampling(data.x[data_train_mask],
