@@ -1,7 +1,7 @@
 import copy
 import torch
 import random
-import torch.nn as nn
+from tqdm import tqdm
 import torch.nn.functional as F
 from torch_scatter import scatter_add
 
@@ -98,17 +98,34 @@ def softlabel_based_hard_nodes_sampling(x:torch.tensor,y,n_cls,diffusion_model,t
     x_t = torch.randn([total,1,n_emb]).to(device)
     # batch sampling
     if total <= MAX_SAMPLING_SIZE:
-        x0,_ = diffusion_model.sampling(guidance_scale=args.guidance_scale,x_t=x_t,y=all_guidances,device=device)
+        print("Single batch sampling")
+        x0,_ = diffusion_model.sampling(guidance_scale=args.guidance,
+                                        x_t=x_t,y=all_guidances,show_pbar=True,device=device)
     else:
         chunks = []
-        for i in range(0, total, MAX_SAMPLING_SIZE):
-            g = all_guidances[i: i + MAX_SAMPLING_SIZE]
-            out,_ = diffusion_model.sampling(guidance_scale=args.guidance_scale
-                                                ,x_t=x_t[i: i + MAX_SAMPLING_SIZE],y=g[i: i + MAX_SAMPLING_SIZE],device=device)
-                
+        # 计算总步数用于显示
+        num_batches = (total + MAX_SAMPLING_SIZE - 1) // MAX_SAMPLING_SIZE
+        
+        # 使用 tqdm 包装 range
+        pbar = tqdm(range(0, total, MAX_SAMPLING_SIZE), desc="Generating Features(batch)", total=num_batches)
+        
+        for i in pbar:
+            g_batch = all_guidances[i: i + MAX_SAMPLING_SIZE]
+            xt_batch = x_t[i: i + MAX_SAMPLING_SIZE]
+            # 执行采样
+            out, _ = diffusion_model.sampling(
+                guidance_scale=args.guidance,
+                x_t=xt_batch,
+                y=g_batch,
+                show_pbar=True,  # 内部采样显示进度条
+                device=device
+            )
             chunks.append(out)
+            # del out
+            # torch.cuda.empty_cache()
+            pbar.set_postfix({"batch_size": xt_batch.size(0)})
         x0 = torch.cat(chunks, dim=0)
-
+    x0 = x0.squeeze(1)
     v_info = {
         "feat": torch.detach(x0),
         "label": torch.detach(all_labels.to(y.dtype))
@@ -431,7 +448,8 @@ def _connect_single_relation(data, ori_num, new_node_num, new_labels, edge_predi
     edge_predicter.eval()
 
     # 连边循环
-    for i in range(new_node_num):
+    pbar = tqdm(range(0, new_node_num), desc="Edges connecting", total=new_node_num)
+    for i in pbar:
         new_idx = ori_num + i
         
         # 确定连边数 d

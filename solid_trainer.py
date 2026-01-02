@@ -144,48 +144,6 @@ class SolidTrainer:
         self.de_scheduler.step(val_recon_loss)
             
         return val_loss, val_cent_loss, val_recon_loss
-    
-    # def cent_pretrain_oneloop(self,args):
-    #     device = self.device
-    #     decoder = self.decoder
-    #     decoder.train()
-    #     self.encoder.train()
-    #     self.centloss_criterion.train()
-    #     self.en_optimizer.zero_grad()
-    #     self.centloss_optimizer.zero_grad()
-    #     neg_edge_index = negative_sampling(
-    #         edge_index=self.data.train_pos_edge_index,
-    #         num_nodes=self.data.num_nodes,
-    #         num_neg_samples=self.data.train_pos_edge_index.size(1))
-    #     edge_labels = torch.cat([torch.ones(self.data.train_pos_edge_index.size(1)), torch.zeros(neg_edge_index.size(1))]).to(self.device)
-    #     emb = self.encoder(self.data.x, self.edge_index[:,self.train_edge_mask], None)
-    #     cent_loss = self.centloss_criterion(emb[self.data_train_mask],self.data.y[self.data_train_mask])
-    #     pos_edge_scores = self.decoder(emb,self.data.train_pos_edge_index)
-    #     neg_edge_scores = self.decoder(emb, neg_edge_index)
-    #     edge_scores = torch.cat([pos_edge_scores,neg_edge_scores],dim=0)
-    #     de_loss = F.binary_cross_entropy_with_logits(edge_scores, edge_labels)
-    #     loss = args.w_con_loss * cent_loss+ de_loss
-    #     loss.backward()
-    #     # for param in centloss_criterion.parameters():
-    #     #     param.grad.data *= (1./args.w_con_loss)
-    #     with torch.no_grad():
-    #         self.encoder.eval()
-    #         self.centloss_criterion.eval()
-    #         self.decoder.eval()
-    #         emb = self.encoder(self.data.x, self.edge_index[:,self.train_edge_mask], None)
-    #         val_cent_loss = self.centloss_criterion(emb[self.data_val_mask],self.data.y[self.data_val_mask])
-    #         val_pos_edge_scores = self.decoder(emb, self.data.val_pos_edge_index)
-    #         val_neg_edge_scores = self.decoder(emb, self.data.val_neg_edge_index.to(self.device))
-    #         val_edge_scores = torch.cat([val_pos_edge_scores,val_neg_edge_scores],dim=0)
-    #         val_edge_labels = torch.cat([torch.ones(self.data.val_pos_edge_index.size(1)), torch.zeros(self.data.val_neg_edge_index.size(1))]).to(self.device)
-    #         val_recon_loss = F.binary_cross_entropy_with_logits(val_edge_scores, val_edge_labels)
-    #         val_loss = args.w_con_loss * val_cent_loss + val_recon_loss
-    #     self.en_optimizer.step()
-    #     # cent_scheduler.step(val_cent_loss)
-    #     self.centloss_optimizer.step()
-    #     # de_optimizer.step()
-    #     self.de_scheduler.step(val_recon_loss)
-    #     return val_loss,val_cent_loss, val_recon_loss
 
     def cent_pretrain(self, args, skip = False, ckpt_path:dict = None, ckpt_save_epoch = 0):
         if skip:
@@ -587,7 +545,7 @@ class SolidTrainer:
                 tmp_test_acc_list.append(tmp_test_acc)
                 tmp_test_f1_list.append(tmp_test_f1)
 
-                if val_f1 > best_val_f1:
+                if bacc[1] > best_val_bacc:
                     best_val_bacc = bacc[1]
                     best_val_acc_f1 = val_acc_f1
                     best_measure = measure_result

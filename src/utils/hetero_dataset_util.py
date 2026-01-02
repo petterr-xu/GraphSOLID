@@ -67,27 +67,40 @@ class GraphDataLoader:
         data = transform(data)
         # 手动划分验证边 
         for etype in data.edge_types:
-            data = manual_split_val_edges(data, etype)
+            data = manual_split_hetero_edges(data, etype)
         if device:
             data = data.to(device)
         # 6. 封装并返回
         return HeteroGraphContext(meta, data)
 
-def manual_split_val_edges(data, edge_type, val_ratio=0.1):
+def manual_split_hetero_edges(data, edge_type, val_ratio=0.1, test_ratio=0.1, max_train_edges=100000):
     """
-    从 HeteroData 的某个 edge_type 中随机抽取部分边作为验证正样本
+    将异构边划分为 训练/验证/测试 三个集合
     """
     edge_index = data[edge_type].edge_index
     num_edges = edge_index.size(1)
+    
+    # 1. 计算各集合数量
     num_val = int(num_edges * val_ratio)
+    num_test = int(num_edges * test_ratio)
+    num_train_all = num_edges - num_val - num_test
     
-    # 打乱索引并切分
+    # 2. 随机打乱并切分
     perm = torch.randperm(num_edges)
-    val_indices = perm[:num_val]
-    train_indices = perm[num_val:]
     
-    # 赋值给 data 对象（自定义属性名）
+    val_indices = perm[:num_val]
+    test_indices = perm[num_val : num_val + num_test]
+    train_indices_all = perm[num_val + num_test:]
+    
+    # 3. 限制训练边数以提速
+    if max_train_edges is not None and train_indices_all.size(0) > max_train_edges:
+        train_indices = train_indices_all[:max_train_edges]
+    else:
+        train_indices = train_indices_all
+        
+    # 4. 赋值给 Data 对象
     data[edge_type].train_pos_edge_index = edge_index[:, train_indices]
     data[edge_type].val_pos_edge_index = edge_index[:, val_indices]
+    data[edge_type].test_pos_edge_index = edge_index[:, test_indices]
     
     return data

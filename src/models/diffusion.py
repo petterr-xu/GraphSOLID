@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from tqdm import tqdm
 import torch.nn.functional as F
 from typing import Tuple, Optional
 
@@ -84,10 +85,10 @@ class GDDPMblock(nn.Module):
             # else:
             nodes_class = y
             # classifier-free 条件生成的噪声预测
-            cond_mask = torch.full_like(t,0,dtype=torch.int32)
+            cond_mask = torch.full_like(t,0,dtype=torch.int32)[:,None]
             eps_theta_cond = self.eps_model(xt, t, nodes_class, cond_mask)
             # classifier-free 无生成的噪声预测
-            uncond_mask = torch.full_like(t,1,dtype=torch.int32)
+            uncond_mask = torch.full_like(t,1,dtype=torch.int32)[:,None]
             eps_theta_uncond = self.eps_model(xt, t, nodes_class, uncond_mask)
             eps_theta = eps_theta_uncond + guidance_scale*(eps_theta_cond - eps_theta_uncond)
             # eps_theta = self.eps_model(xt, t, y)
@@ -106,12 +107,10 @@ class GDDPMblock(nn.Module):
             eps = torch.randn(xt.shape, device=xt.device)
             # del eps_theta
         return mean_cond + (var ** .5) * eps
-    
-    def sampling(self,classifier_model,classifier_scale_mode,guidance_scale,x_t:torch.Tensor,y:torch.Tensor, padding=(0,0,0,0),save_frames=False,device="cuda:0"):
+
+    def sampling(self,guidance_scale,x_t:torch.Tensor,y:torch.Tensor, padding=(0,0,0,0),save_frames=False, show_pbar=False,device="cuda:0"):
         """采样生成
         Args:
-            classifier_model (list): 引导用的分类器=[classifier,loss_fun,classifier_loss_beta]
-            classifier_scale_mode (_type_): 分类器梯度scale
             guidance_scale : classifier-free guidance 引导强度
             x_t (torch.Tensor): 输入噪声x_t.shape = [batch_size,in_channel,feat_length]
             y (torch.Tensor): onehot编码的类型引导 y.shape = [batch_size,num_classes]
@@ -124,19 +123,15 @@ class GDDPMblock(nn.Module):
         assert x_t.shape[0] == y.shape[0],"check x_t and y shape"
         t_schedule = torch.arange(0,self.n_steps,1).flip(dims=[0])
         batch_size = x_t.shape[0]
-        if classifier_scale_mode == "exp":
-            max_scale = 3
-            temperature = 100.0
-            # 用指数函数调整不同时间步时classifier_scale的大小
-            # t较大时（即去噪开始时）classifier_scale比较大，当样本基本成型（即t较小时），classifier_scale也较小（趋近于零）
-            classifier_scale = (max_scale)*torch.exp(-(t_schedule)/temperature)
-        else:
-            classifier_scale = torch.full_like(t_schedule,classifier_scale_mode)
-        for t in t_schedule:
-            t_batch = torch.full([batch_size],t).to(device,torch.int64)
-            x_t = self.p_sample(classifier_model,classifier_scale[t],guidance_scale,x_t,t_batch,y)
+        
+        pbar = tqdm(t_schedule, desc="Diffusion Sampling", disable=not show_pbar, leave=False)
+
+        for t in pbar:
+            t_batch = torch.full([batch_size], t).to(device, torch.int64)
+            x_t = self.p_sample(guidance_scale, x_t, t_batch, y)
             if save_frames and (t + 1) % 10 == 0:
                 frames.append(x_t)
+            pbar.set_postfix({'t':f"{t.item()}/{self.n_steps}"})
         
         # 可能需要考虑去除padding
         x_t = self.remove_padding(x_t, padding)

@@ -560,6 +560,41 @@ def show_sample_dis(x_o, x_g, y_o, y_g, num_class, title, path , save=True):
         plt.savefig(path.replace("\\",os.sep))
     plt.close()
 
+def show_hetero_samples_dis(data, fold, n_generated_nodes, target, num_class = 6, trans=None):
+    embedding = data[target].x.detach().cpu().numpy()
+    # if trans is not None:
+    #     embedding = trans(embedding)
+    generate_mask = np.array([0] * (len(embedding) - n_generated_nodes) + [1] * n_generated_nodes)
+    tsne = TSNE(n_components=2, random_state=42)
+    X_tsne = tsne.fit_transform(embedding)
+    y_original_np = data[target].y[:-n_generated_nodes].cpu().detach().numpy()
+    y_generated_np = data[target].y[-n_generated_nodes:].cpu().detach().numpy()
+    # print(y_generated_np)
+    # 所有样本
+    show_sample_dis(X_tsne[generate_mask == 0],
+                    X_tsne[generate_mask == 1],
+                    y_original_np,
+                    y_generated_np,
+                    num_class,
+                    "All Samples",
+                    fold + "\\all_samples.svg")
+    # 训练集和生成样本
+    show_sample_dis(X_tsne[np.logical_and(generate_mask == 0, data[target].train_mask.cpu().detach().numpy())],
+                    X_tsne[generate_mask == 1],
+                    data[target].y[data[target].train_mask][:-n_generated_nodes].cpu().detach().numpy(),
+                    y_generated_np,
+                    num_class,
+                    "Train Samples",
+                    fold + "\\train_samples.svg")
+
+    # 测试集和生成样本
+    show_sample_dis(X_tsne[np.logical_and(generate_mask == 0, data[target].test_mask.cpu().detach().numpy())],
+                    X_tsne[generate_mask == 1],
+                    data[target].y[data[target].test_mask].cpu().detach().numpy(),
+                    y_generated_np,
+                    num_class,
+                    "Test Samples",
+                    fold + "\\test_samples.svg")
 
 def show_samples_dis(data, fold, n_generated_nodes, num_class = 6, trans=None):
     embedding = data.x.detach().cpu().numpy()

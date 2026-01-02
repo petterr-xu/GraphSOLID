@@ -53,8 +53,7 @@ if args.dataset in ['YelpChi', 'Amazon-Products']:
         data_num = (stats == i).sum()
         n_data.append(int(data_num.item()))
     idx_info = VNG_utils.get_idx_info(data[target].y, n_cls, data_train_mask)
-    class_num_list = n_data
-    print("num of class in original training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
+    print("num of class in original training data: {} -> {}".format(n_data,sum(data_train_mask).item()))
     class_num_list, data_train_mask, _, edge_mask_dict = graphbuilder.make_hetero_longtailed_data_remove(data, target, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
     # 更新 HeteroData
     hetero_ctx.g[hetero_ctx.target_node].train_mask = data_train_mask
@@ -154,18 +153,18 @@ for r in range(repeatition):
     
     trainer.minority_mask = minority_mask
     cktp_path = {
-        "encoder": "/home/xvwenduan/GraphSOLID/ckpt/encoder/YelpChi/encoder_YelpChi_20251231_190604_e109_.pth",
-        "decoder": "/home/xvwenduan/GraphSOLID/ckpt/decoder/YelpChi/decoder_YelpChi_20251231_190604_e109_.pth"
+        "encoder": "/home/xvwenduan/GraphSOLID/ckpt/encoder/YelpChi/encoder_YelpChi_20251231_190604_e119_.pth",
+        "decoder": "/home/xvwenduan/GraphSOLID/ckpt/decoder/YelpChi/decoder_YelpChi_20251231_190604_e119_.pth"
     }
-    emb_data = trainer.cent_pretrain(args, skip=True, ckpt_path=cktp_path, ckpt_save_epoch=0)
+    emb_data = trainer.cent_pretrain(args, skip=False, ckpt_path=cktp_path, ckpt_save_epoch=0)
     # cover data with initial embeddings
     trainer.update_data(emb_data)
     trainer.train_teacher(epochs=args.epochs)
     trainer.train_diffusion(args,ckpt_save_epoch=0)
 
     emb_data = emb_data.to(device)
-    v_information, src_idx = solid.softlabel_based_hard_nodes_sampling(emb_data[hetero_ctx.target].x[data_train_mask],
-                                                        emb_data[hetero_ctx.target].y[data_train_mask],
+    v_information, src_idx = solid.softlabel_based_hard_nodes_sampling(emb_data[hetero_ctx.target_node].x[data_train_mask],
+                                                        emb_data[hetero_ctx.target_node].y[data_train_mask],
                                                         n_cls,
                                                         diffusion_model = diffusion_model,
                                                         teacher = teacher_model,
@@ -176,13 +175,13 @@ for r in range(repeatition):
     new_node_num = v_information['feat'].shape[0]
     print("{} new nodes".format(new_node_num))
     _, _, _, report_on_gen_samples = trainer.teacher_test(v_information['feat'], v_information['label'])
-    print("Performance on generated samples: ", report_on_gen_samples)
+    print("\nPerformance on generated samples: ", report_on_gen_samples)
 
-    aug_data = solid.add_new_hetero_nodes_all_relations(data,
+    aug_data = solid.add_new_hetero_nodes_all_relations(emb_data,
                                                         v_information['feat'],
                                                         v_information['label'],
                                                         edge_decoder,
-                                                        target=hetero_ctx.target_node,
+                                                        target_node=hetero_ctx.target_node,
                                                         device=device)
     # update trainer data
     trainer.update_data(aug_data)
@@ -201,7 +200,7 @@ for r in range(repeatition):
     print(best_measure)
     print('Test Acc: {:.4f}, BAcc: {:.4f}, F1: {:.4f}'.format(test_acc,test_bacc,test_f1))
 
-    VNG_utils.show_samples_dis(aug_data,f"history_data//figure//aug_"+args.dataset,new_node_num,n_cls)
+    VNG_utils.show_hetero_samples_dis(aug_data,f"history_data//figure//aug_"+args.dataset,new_node_num,target=hetero_ctx.target_node,num_class=n_cls)
 
 
 if repeatition == 1 : exit()
