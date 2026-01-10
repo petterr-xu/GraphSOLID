@@ -149,7 +149,6 @@ dependencies:
       - copulas==0.12.3
       - cycler==0.12.1
       - datasets==4.4.1
-      - dgl==2.4.0+cu121
       - dill==0.4.0
       - docker-pycreds==0.4.0
       - et-xmlfile==2.0.0
