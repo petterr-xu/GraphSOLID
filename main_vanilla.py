@@ -125,6 +125,7 @@ for r in range(repeatition):
         "diff_bs" : args.batch_size,
         "n_hid" : args.n_hid,
         "r" : repeatition,
+        "loss_type" : args.loss_type,
         "device" : device
     }
 

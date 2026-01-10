@@ -24,7 +24,7 @@ class SolidTrainer:
     def __init__(self, ctx: HeteroGraphContext, diffusion: nn.Module, teacher: nn.Module, edge_learner: nn.Module,  
                     classifier: nn.Module, encoder: nn.Module, minority_mask,
                     diff_lr=1e-4, tearch_lr=1e-3, el_lr=1e-3, cl_lr=1e-3, en_lr=1e-3, cent_lr=1e-3, 
-                    n_hid=512, diff_bs=64, r=None, plot=False, save_model=True, device='cuda:0'):
+                    n_hid=512, diff_bs=64, r=None, plot=False, save_model=True, loss_type='ce', device='cuda:0'):
             
         self.ctx = ctx
         self.target = ctx.target_node
@@ -69,7 +69,21 @@ class SolidTrainer:
                                                                 factor = 0.5,
                                                                 patience = 100,
                                                                 verbose=False)
-        self.classifier_criterion = loss_fn.CrossEntropy().to(device)
+        factor_focal = 2.0
+        factor_cb = 0.9999
+        class_count = torch.bincount(self.data[self.target].y[self.data_train_mask].view(-1), minlength=self.ctx.n_classes).to(self.device,torch.float)
+        if loss_type == "re":
+            self.classifier_criterion = loss_fn.IMB_LOSS("re-weight",self.ctx.n_classes,class_count.detach().cpu().numpy(),device=self.device)
+        elif loss_type == "ce":
+            self.classifier_criterion = loss_fn.IMB_LOSS("ce",self.ctx.n_classes,class_count.detach().cpu().numpy(),device=self.device)
+        elif loss_type == "cb":
+            self.classifier_criterion = loss_fn.IMB_LOSS("cb-softmax",self.ctx.n_classes,class_count.detach().cpu().numpy(),factor_cb,device=self.device)
+            # classifier_criterion = criterion.compute
+        elif loss_type == "focal":
+            self.classifier_criterion = loss_fn.IMB_LOSS("focal",self.ctx.n_classes,class_count.detach().cpu().numpy(),factor_focal,device=self.device)
+            # classifier_criterion = criterion.compute
+        else:
+            raise Exception("No Implentation Loss")
 
     def cent_pretrain_oneloop(self, args):
         device = self.device
@@ -461,7 +475,7 @@ class SolidTrainer:
         val_mask = self.data[target].val_mask
         
         # 计算训练损失
-        loss = self.classifier_criterion(logits[train_mask], labels[train_mask], weight=weights)
+        loss = self.classifier_criterion.compute(logits[train_mask], labels[train_mask])
         loss.backward()
         self.classifier_optimizer.step()
 
@@ -469,7 +483,7 @@ class SolidTrainer:
         with torch.no_grad():
             self.classifier.eval()
             output = self.classifier(self.data.x_dict, self.data.edge_index_dict)
-            val_loss = F.cross_entropy(output[val_mask], labels[val_mask])
+            val_loss = self.classifier_criterion.compute(output[val_mask], labels[val_mask])
         self.classifier_optimizer.step()
         self.cl_scheduler.step(val_loss)
         return loss.item(), val_loss.item()

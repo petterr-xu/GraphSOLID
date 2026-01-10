@@ -18,6 +18,7 @@ def parse_args():
     parser.add_argument('--n_layers', type=int, default=1, help='the number of layers')
     parser.add_argument('--feat_dim', type=int, choices=[64,128,256,512], default=64, help='feature dimension')
     parser.add_argument('--epochs', type=int, default=1500, help='epochs')
+    parser.add_argument('--loss_type', type=str, choices=['re', 'ce', 'cb', 'focal'], default='ce', help='loss type: re-weighting (re), class-balanced (cb), focal loss (focal), cross-entropy (ce)')
     ## encoder setup
     parser.add_argument('--en_lr', type=float, default=1e-2, help='learning rate for encoder')
     parser.add_argument('--n_hid',type=int,default=32)
