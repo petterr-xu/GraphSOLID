@@ -1,6 +1,10 @@
-import numpy as np
 import torch
+import numpy as np
 from torch_scatter import scatter_add
+from torch_sparse import SparseTensor
+from torch_geometric.data import Data
+import torch_geometric.transforms as T
+from torch_geometric.data import HeteroData
 
 
 def make_longtailed_data_remove(edge_index, label, n_data, n_cls, ratio, train_mask, max_n=500):
@@ -179,3 +183,119 @@ def make_hetero_longtailed_data_remove(data, target_node, n_data, n_cls, ratio, 
     new_train_mask = final_node_mask & train_mask
     
     return list(class_num_list), new_train_mask, final_node_mask, edge_mask_dict
+
+def extract_view_by_transform(pyg_graph, metapath_steps, target_node, weighted=False):
+    """
+    底层逻辑：自动适配单跳边和多跳元路径。
+    """
+    # 1. 格式标准化：确保是 List[Tuple]
+    if isinstance(metapath_steps[0], str): 
+        # 处理 ["review", "rur", "review"] 这种情况
+        actual_path = [tuple(metapath_steps)]
+    else:
+        # 处理 [("paper", "to", "author"), ("author", "to", "paper")] 这种情况
+        actual_path = [tuple(step) for step in metapath_steps]
+
+    # --- 核心分流逻辑 ---
+    
+    # 情况 A：单跳边 (YelpChi 现状)
+    if len(actual_path) == 1:
+        edge_type = actual_path[0]
+        # 直接提取 edge_index，避开 AddMetaPaths 的 len>=2 限制
+        # 如果 HeteroData 中没有完整三元组 key，则尝试用关系名 key
+        if edge_type in pyg_graph.edge_types:
+            edge_index = pyg_graph[edge_type].edge_index
+        else:
+            edge_index = pyg_graph[edge_type[1]].edge_index
+            
+        view_data = Data(
+            x=pyg_graph[target_node].x,
+            y=pyg_graph[target_node].y,
+            edge_index=edge_index
+        )
+        if weighted: # 单跳边默认权重为 1
+            view_data.edge_weight = torch.ones(edge_index.size(1), device=edge_index.device)
+
+    # 情况 B：多跳路径 (需要矩阵乘法压缩)
+    else:
+        # 使用官方 Transform
+        transform = T.AddMetaPaths(
+            metapaths=[actual_path], 
+            drop_orig_edge_types=True,
+            weighted=weighted  # 你可以开启这个选项来获取路径数量作为权重
+        )
+        temp_hetero = transform(pyg_graph.clone())
+        
+        # 提取新生成的元路径边
+        new_edge_type = temp_hetero.edge_types[0]
+        view_data = Data(
+            x=temp_hetero[target_node].x, 
+            y=temp_hetero[target_node].y,
+            edge_index=temp_hetero[new_edge_type].edge_index
+        )
+        if weighted and hasattr(temp_hetero[new_edge_type], 'edge_weight'):
+            view_data.edge_weight = temp_hetero[new_edge_type].edge_weight
+
+    # 2. 通用后处理：继承掩码
+    for mask in ['train_mask', 'val_mask', 'test_mask']:
+        if hasattr(pyg_graph[target_node], mask):
+            setattr(view_data, mask, getattr(pyg_graph[target_node], mask))
+            
+    return view_data
+
+def extract_view_by_matrix(pyg_graph, metapath_steps, target_node):
+    
+    """
+    pyg_graph: 原始异构图
+    metapath_steps: 元路径列表，例如 [('review', 'user'), ('user', 'review')]
+    target_node: 投影后的同构图节点类型
+    """
+    # 1. 格式标准化：确保 metapath_steps 是一个包含完整边定义的列表
+    # 如果是 ['review', 'rur', 'review'] -> 变成 [('review', 'rur', 'review')]
+    if isinstance(metapath_steps[0], str) and len(metapath_steps) == 3:
+        metapath_steps = [tuple(metapath_steps)]
+    else:
+        # 如果是 [[...], [...]] -> 确保内部是元组
+        metapath_steps = [tuple(step) for step in metapath_steps]
+    adj = None
+    device = pyg_graph[target_node].x.device
+    
+    # 2. 逐跳进行矩阵乘法
+    for etype in metapath_steps:
+        # 此时 etype 一定是 ('src', 'rel', 'dst') 元组，PyG 会准确返回 EdgeStorage
+        if etype not in pyg_graph.edge_types:
+            # 兼容性处理：如果元组匹配失败，尝试使用关系名字符串 'rur'
+            rel_name = etype[1]
+            edge_index = pyg_graph[rel_name].edge_index
+        else:
+            edge_index = pyg_graph[etype].edge_index
+            
+        size = (pyg_graph[etype[0]].num_nodes, pyg_graph[etype[2]].num_nodes)
+        
+        # 构造稀疏张量
+        curr_adj = SparseTensor(
+            row=edge_index[0], col=edge_index[1], 
+            sparse_sizes=size
+        ).to(device)
+        
+        if adj is None:
+            adj = curr_adj
+        else:
+            adj = adj.matmul(curr_adj)
+    
+    # 3. 提取结果
+    row, col, value = adj.coo()
+    
+    view_data = Data(
+        x=pyg_graph[target_node].x, 
+        y=pyg_graph[target_node].y,
+        edge_index=torch.stack([row, col], dim=0),
+        edge_attr=value # 存储路径计数
+    )
+    
+    # 继承掩码
+    for mask in ['train_mask', 'val_mask', 'test_mask']:
+        if hasattr(pyg_graph[target_node], mask):
+            setattr(view_data, mask, getattr(pyg_graph[target_node], mask))
+            
+    return view_data

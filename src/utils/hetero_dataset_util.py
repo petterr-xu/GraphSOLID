@@ -5,6 +5,8 @@ import numpy as np
 from torch_geometric.data import HeteroData
 import torch_geometric.transforms as T
 
+from .graphbuilder import extract_view_by_matrix, extract_view_by_transform
+
 class HeteroGraphContext:
     """
     自定义的图数据上下文对象，封装了元数据和 PyG 异构图。
@@ -14,6 +16,7 @@ class HeteroGraphContext:
         self.g = pyg_graph        # PyG HeteroData 对象
         self.name = metadata.get('dataset_name', 'Unknown')
         self.target_node = metadata.get('target_node')
+        self.views = None
 
     def __repr__(self):
         return f"<FraudGraphContext: {self.name} | Nodes: {self.g.node_types} | Edges: {self.g.edge_types}>"
@@ -27,6 +30,26 @@ class HeteroGraphContext:
     def n_features(self):
         # 自动获取目标节点的特征维度
         return self.g[self.target_node].x.shape[1]
+    
+    def build_view_by_all_edges(self, backend='transform'):
+        views = self._get_views(backend=backend)
+        self.views = views
+        return views
+    
+    def _get_views(self, backend='transform'):
+        """
+        上层自动调度：Backend 可选 'matrix' 或 'transform'
+        """
+        views = {}
+        for view_name, path_info in self.meta['edges'].items():
+            # 如果是单跳边，两种方案其实结果一致
+            # 如果是多跳元路径：
+            if backend == 'matrix':
+                views[view_name] = extract_view_by_matrix(self.g, path_info, self.target_node)
+            else:
+                views[view_name] = extract_view_by_transform(self.g, path_info, self.target_node)
+                
+        return views
 
 class GraphDataLoader:
     """

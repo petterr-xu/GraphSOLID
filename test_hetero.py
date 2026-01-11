@@ -56,63 +56,70 @@ print("num of class in LT-training data: {} -> {}".format(class_num_list,sum(dat
 minority_mask = class_num_list < (sum(class_num_list)/n_cls)
 minority_class = [i for i in range(n_cls) if minority_mask[i]]
 print("minority classes {}".format(minority_class))
+print("========= auto meta view extraction =========")
+homo = ctx._get_views(backend='matrix')
+print(homo)
+print("========= manual meta view extraction =========")
+metapath = [('review','rur','review'),('review','rsr', 'review')]
+homo = graphbuilder.extract_view_by_transform(ctx.g, metapath, target)
+print(homo)
 
-denoise_nhid = n_feat
-denoise_kwargs = {
-    "feature_length": denoise_nhid,
-    "n_length": args.n_length,
-    "n_channels": args.n_channels,
-    "ch_mults": args.ch_mults,
-    "is_attn": args.is_attn,
-    "n_blocks": args.n_blocks,
-    "class_channels": args.class_embedding_channel,
-    "time_channels": args.time_embedding_channel,
-    "num_class": n_cls,
-}
-eps_model = unet.UNet(**denoise_kwargs)
-# eps_model = unet_vector.UNet(denoise_config)
-if args.beta_schedule == "lin":
-    beta = torch.linspace(args.beta_bound[0], args.beta_bound[1], args.T)
-elif args.beta_schedule == "exp":
-    beta_exp = args.beta_bound[0] * (args.beta_bound[1] / args.beta_bound[0]) ** (np.arange(args.T) / args.T)
-    beta = torch.tensor(beta_exp,dtype=torch.float32)
-elif args.beta_schedule == "quad":
-    beta_quad = args.beta_bound[0] + (np.arange(args.T) / args.T) ** 2 * (args.beta_bound[1] - args.beta_bound[0])
-    beta = torch.tensor(beta_quad,dtype=torch.float32)
-else:
-    print("NO SUCH BETA SCHEDULE:"+args.beta_schedule)
-    raise Exception
-teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
-diffusion_model = diffusion.GDDPMblock(eps_model,beta,n_steps=args.T,device=device).to(device)
-dif_optimizer = torch.optim.Adam(diffusion_model.eps_model.parameters(), lr=args.dif_lr)
-# definition of edge learner
-node_types = ctx.g.node_types
-edge_types = ctx.g.edge_types
-# 自动生成维度字典 (根据 ctx.g 的特征形状)
-node_dim_dict = {
-    node_type: n_feat
-    for node_type in node_types
-}
-edge_decoder = edge_learner.HeteroEdgePredicter(
-    node_types=node_types,
-    edge_types=edge_types,
-    node_dim_dict=node_dim_dict,
-    n_hid=args.decoder_hid
-).to(device)
-v_information, src_idx = solid.softlabel_based_hard_nodes_sampling(data[ctx.target_node].x[data[ctx.target_node].train_mask],
-                                                    data[ctx.target_node].y[data[ctx.target_node].train_mask],
-                                                    n_cls,
-                                                    diffusion_model = diffusion_model,
-                                                    teacher = teacher_model,
-                                                    args = args,
-                                                    device=device)
-# construct new nodes and edges then augment the graph
-new_node_num = v_information['feat'].shape[0]
-print("{} new nodes".format(new_node_num))
+# denoise_nhid = n_feat
+# denoise_kwargs = {
+#     "feature_length": denoise_nhid,
+#     "n_length": args.n_length,
+#     "n_channels": args.n_channels,
+#     "ch_mults": args.ch_mults,
+#     "is_attn": args.is_attn,
+#     "n_blocks": args.n_blocks,
+#     "class_channels": args.class_embedding_channel,
+#     "time_channels": args.time_embedding_channel,
+#     "num_class": n_cls,
+# }
+# eps_model = unet.UNet(**denoise_kwargs)
+# # eps_model = unet_vector.UNet(denoise_config)
+# if args.beta_schedule == "lin":
+#     beta = torch.linspace(args.beta_bound[0], args.beta_bound[1], args.T)
+# elif args.beta_schedule == "exp":
+#     beta_exp = args.beta_bound[0] * (args.beta_bound[1] / args.beta_bound[0]) ** (np.arange(args.T) / args.T)
+#     beta = torch.tensor(beta_exp,dtype=torch.float32)
+# elif args.beta_schedule == "quad":
+#     beta_quad = args.beta_bound[0] + (np.arange(args.T) / args.T) ** 2 * (args.beta_bound[1] - args.beta_bound[0])
+#     beta = torch.tensor(beta_quad,dtype=torch.float32)
+# else:
+#     print("NO SUCH BETA SCHEDULE:"+args.beta_schedule)
+#     raise Exception
+# teacher_model = teacher.MLPTeacher(n_feat,n_cls,layers=1,drop=0.4).to(device)
+# diffusion_model = diffusion.GDDPMblock(eps_model,beta,n_steps=args.T,device=device).to(device)
+# dif_optimizer = torch.optim.Adam(diffusion_model.eps_model.parameters(), lr=args.dif_lr)
+# # definition of edge learner
+# node_types = ctx.g.node_types
+# edge_types = ctx.g.edge_types
+# # 自动生成维度字典 (根据 ctx.g 的特征形状)
+# node_dim_dict = {
+#     node_type: n_feat
+#     for node_type in node_types
+# }
+# edge_decoder = edge_learner.HeteroEdgePredicter(
+#     node_types=node_types,
+#     edge_types=edge_types,
+#     node_dim_dict=node_dim_dict,
+#     n_hid=args.decoder_hid
+# ).to(device)
+# v_information, src_idx = solid.softlabel_based_hard_nodes_sampling(data[ctx.target_node].x[data[ctx.target_node].train_mask],
+#                                                     data[ctx.target_node].y[data[ctx.target_node].train_mask],
+#                                                     n_cls,
+#                                                     diffusion_model = diffusion_model,
+#                                                     teacher = teacher_model,
+#                                                     args = args,
+#                                                     device=device)
+# # construct new nodes and edges then augment the graph
+# new_node_num = v_information['feat'].shape[0]
+# print("{} new nodes".format(new_node_num))
 
-aug_data = solid.add_new_hetero_nodes_all_relations(data,
-                                                    v_information['feat'],
-                                                    v_information['label'],
-                                                    edge_decoder,
-                                                    target_node=ctx.target_node,
-                                                    device=device)
+# aug_data = solid.add_new_hetero_nodes_all_relations(data,
+#                                                     v_information['feat'],
+#                                                     v_information['label'],
+#                                                     edge_decoder,
+#                                                     target_node=ctx.target_node,
+#                                                     device=device)

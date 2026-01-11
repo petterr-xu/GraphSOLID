@@ -559,7 +559,7 @@ class SolidTrainer:
                 tmp_test_acc_list.append(tmp_test_acc)
                 tmp_test_f1_list.append(tmp_test_f1)
 
-                if bacc[1] > best_val_bacc:
+                if val_acc_f1 > best_val_acc_f1:
                     best_val_bacc = bacc[1]
                     best_val_acc_f1 = val_acc_f1
                     best_measure = measure_result
