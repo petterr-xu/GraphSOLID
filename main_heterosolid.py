@@ -30,43 +30,14 @@ root_path = osp.dirname(osp.realpath(__file__))
 loader = GraphDataLoader()
 data_path = osp.join(root_path, 'data', args.dataset, 'data', args.dataset + '.mat')
 cnfg_path = osp.join(root_path, 'data', args.dataset, 'meta', args.dataset + '.json')
-hetero_ctx = loader.load_from_config(cnfg_path, data_path)
-target = hetero_ctx.target_node  # 'review' 或 'user'
-data = hetero_ctx.g.to(device)
-n_feat = hetero_ctx.n_features
-n_cls = hetero_ctx.n_classes
-print(data)
 
-repeatition = 1
+repeatition = 5
 max_n=500
 overall_test_acc, overall_val_acc, overall_val_f1, overall_test_bacc, overall_test_f1 = [], [], [], [], []
 overall_mi_recall = []
 overall_ma_recall = []
 mi_recall = []
 ma_recall = []
-
-if args.dataset in ['YelpChi', 'Amazon-Products']:
-    data_train_mask, data_val_mask, data_test_mask = data[target].train_mask.clone(), data[target].val_mask.clone(), data[target].test_mask.clone()
-    stats = data[target].y[data_train_mask]
-    n_data = []
-    for i in range(n_cls):
-        data_num = (stats == i).sum()
-        n_data.append(int(data_num.item()))
-    idx_info = VNG_utils.get_idx_info(data[target].y, n_cls, data_train_mask)
-    print("num of class in original training data: {} -> {}".format(n_data,sum(data_train_mask).item()))
-    class_num_list, data_train_mask, _, edge_mask_dict = graphbuilder.make_hetero_longtailed_data_remove(data, target, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
-    # 更新 HeteroData
-    hetero_ctx.g[hetero_ctx.target_node].train_mask = data_train_mask
-    # 更新边索引 (可选，取决于是否想物理删除边)
-    if not args.keep_edge:
-        for etype, mask in edge_mask_dict.items():
-            hetero_ctx.g[etype].edge_index = hetero_ctx.g[etype].edge_index[:, mask]
-    print("num of class in LT-training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
-    minority_mask = class_num_list < (sum(class_num_list)/n_cls)
-    minority_class = [i for i in range(n_cls) if minority_mask[i]]
-    print("minority classes {}".format(minority_class))
-else:
-    raise NotImplementedError("Not implemented for dataset {}".format(args.dataset))
 
 for r in range(repeatition):
     args.seed = args.seed + 1
@@ -78,6 +49,35 @@ for r in range(repeatition):
     torch.backends.cudnn.benchmark = False
     random.seed(args.seed)
     np.random.seed(args.seed)
+    
+    hetero_ctx = loader.load_from_config(cnfg_path, data_path)
+    target = hetero_ctx.target_node  # 'review' 或 'user'
+    data = hetero_ctx.g.to(device)
+    n_feat = hetero_ctx.n_features
+    n_cls = hetero_ctx.n_classes
+    print(data)
+    if args.dataset in ['YelpChi', 'Amazon-Products']:
+        data_train_mask, data_val_mask, data_test_mask = data[target].train_mask.clone(), data[target].val_mask.clone(), data[target].test_mask.clone()
+        stats = data[target].y[data_train_mask]
+        n_data = []
+        for i in range(n_cls):
+            data_num = (stats == i).sum()
+            n_data.append(int(data_num.item()))
+        idx_info = VNG_utils.get_idx_info(data[target].y, n_cls, data_train_mask)
+        print("num of class in original training data: {} -> {}".format(n_data,sum(data_train_mask).item()))
+        class_num_list, data_train_mask, _, edge_mask_dict = graphbuilder.make_hetero_longtailed_data_remove(data, target, n_data, n_cls, args.imb_ratio, data_train_mask.clone(), max_n)
+        # 更新 HeteroData
+        hetero_ctx.g[hetero_ctx.target_node].train_mask = data_train_mask
+        # 更新边索引 (可选，取决于是否想物理删除边)
+        if not args.keep_edge:
+            for etype, mask in edge_mask_dict.items():
+                hetero_ctx.g[etype].edge_index = hetero_ctx.g[etype].edge_index[:, mask]
+        print("num of class in LT-training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
+        minority_mask = class_num_list < (sum(class_num_list)/n_cls)
+        minority_class = [i for i in range(n_cls) if minority_mask[i]]
+        print("minority classes {}".format(minority_class))
+    else:
+        raise NotImplementedError("Not implemented for dataset {}".format(args.dataset))
 
     encoder = HeteroNN.HeteroSAGE(hetero_ctx.g.metadata(), args.n_hid, num_layers=args.n_en_layers).to(device)
     teacher_model = teacher.MLPTeacher(args.n_hid,n_cls,layers=1,drop=0.4).to(device)
