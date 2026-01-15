@@ -674,3 +674,86 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         extra_y = torch.cat((extra_y, t), dim=1)
 
         return utils.PlaceHolder(X=extra_X, E=extra_E, y=extra_y)
+    
+    @torch.no_grad()
+    def purify(self, data, t_purify_steps: int):
+        """
+        基于扩散净化的对抗防御方法。
+        
+        Args:
+            data: PyG的Batch对象或Data对象，包含对抗样本。
+            t_purify_steps: 净化步数 (t*)。
+                            t* 越大，去噪越彻底，但原语义丢失越多；
+                            t* 越小，保留语义越多，但防御效果越弱。
+                            通常取总步数 T 的 10%-30%。
+        Returns:
+            purified_data: 净化后的密集图数据 (PlaceHolder对象 containing X, E, y)
+        """
+        self.eval() # 确保模型处于评估模式
+        
+        # 1. 数据预处理：将 PyG 稀疏图转换为模型需要的 Dense 格式
+        # 注意：这里假设输入的同构图已经被量化为离散特征，或者本身就是离散类别
+        dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
+        dense_data = dense_data.mask(node_mask)
+        X, E, y = dense_data.X, dense_data.E, data.y
+        bs, n, _ = X.shape
+        
+        # -----------------------------------------------------------
+        # 阶段一：前向扩散 (注入噪声) 0 -> t*
+        # -----------------------------------------------------------
+        # 我们不需要一步步加噪，直接利用 Qt_bar 矩阵一步跳转到 t* 时刻
+        
+        # 构造 t* 的时间张量
+        t_int = t_purify_steps * torch.ones((bs, 1), device=self.device)
+        t_float = t_int / self.T # 归一化时间
+        
+        # 获取从 0 到 t* 的累积噪声强度 alpha_bar
+        alpha_t_bar = self.noise_schedule.get_alpha_bar(t_normalized=t_float)
+        
+        # 获取转移矩阵 Qt_bar
+        Qtb = self.transition_model.get_Qt_bar(alpha_t_bar, device=self.device)
+        
+        # 计算转移概率 (X * Qtb)
+        probX = X @ Qtb.X  # (bs, n, dx_out)
+        probE = E @ Qtb.E.unsqueeze(1)  # (bs, n, n, de_out)
+        
+        # 基于概率进行离散采样，得到带噪状态 z_{t*}
+        sampled_t = diffusion_utils.sample_discrete_features(probX=probX, probE=probE, node_mask=node_mask)
+        
+        # 转换为 One-Hot 编码 (逆向过程的输入必须是 One-Hot)
+        X_curr = F.one_hot(sampled_t.X, num_classes=self.Xdim_output).float()
+        E_curr = F.one_hot(sampled_t.E, num_classes=self.Edim_output).float()
+        y_curr = y # 全局特征通常保持不变或单独处理，这里沿用
+        
+        # -----------------------------------------------------------
+        # 阶段二：逆向去噪 (重建) t* -> 0
+        # -----------------------------------------------------------
+        # 从 t* 倒数回到 0
+        for s_int in reversed(range(0, t_purify_steps)):
+            # 计算当前步 s 和上一步 t 的归一化时间
+            s_array = s_int * torch.ones((bs, 1), device=self.device).type_as(y)
+            t_array = s_array + 1
+            s_norm = s_array / self.T
+            t_norm = t_array / self.T
+            
+            # 调用已有的单步去噪采样函数 sample_p_zs_given_zt
+            # 该函数内部会调用 self.forward() 进行预测，并结合贝叶斯公式采样
+            sampled_s, discrete_sampled_s = self.sample_p_zs_given_zt(
+                s=s_norm, 
+                t=t_norm, 
+                X_t=X_curr, 
+                E_t=E_curr, 
+                y_t=y_curr, 
+                node_mask=node_mask
+            )
+            
+            # 更新当前状态，准备下一步迭代
+            X_curr, E_curr, y_curr = sampled_s.X, sampled_s.E, sampled_s.y
+
+        # -----------------------------------------------------------
+        # 输出：返回最终采样出的离散图结构 (t=0)
+        # -----------------------------------------------------------
+        # discrete_sampled_s 包含了最终的类别索引 (非 One-Hot)
+        final_output = discrete_sampled_s.mask(node_mask, collapse=True)
+        
+        return final_output

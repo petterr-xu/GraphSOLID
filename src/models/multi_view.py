@@ -41,15 +41,15 @@ class MultiViewGNN(nn.Module):
             GNNLayer = gat
         else:
             raise NotImplementedError("Not Implemented Architecture: "+net)
-        # 1. 为每个元视图定义独立的 GNN 编码器
+        
         self.encoders = nn.ModuleDict({
             name: GNNLayer(n_features, hidden_dim) for name in view_names
         })
         
-        # 2. 语义融合层
+        # 语义融合层
         self.semantic_fusion = SemanticAttention(hidden_dim)
         
-        # 3. 分类头
+        # 分类头
         self.classifier = mlp.MLP(hidden_dim, n_classes, 2)
 
     def forward(self, views_dict):
@@ -58,19 +58,16 @@ class MultiViewGNN(nn.Module):
         """
         z_list = []
         
-        # 第一阶段：处理每一个元视图
         for name in self.view_names:
             data = views_dict[name]
-            # 这里可以接入你的扩散去噪逻辑：
             # edge_index = self.denoise(data.edge_index) 
             z = self.encoders[name](data.x, data.edge_index)
             z = F.relu(z)
             z_list.append(z)
             
-        # 第二阶段：基于注意力的嵌入融合
+        # 基于注意力的嵌入融合
         combined_z, att_weights = self.semantic_fusion(z_list)
         
-        # 第三阶段：分类预测
         out = self.classifier(combined_z)
         
         return out, att_weights
