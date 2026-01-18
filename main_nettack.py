@@ -5,7 +5,8 @@ import warnings
 import statistics
 import numpy as np
 import os.path as osp
-from torch_geometric.utils import train_test_split_edges,negative_sampling
+from torch_geometric.utils import train_test_split_edges, negative_sampling, from_scipy_sparse_matrix
+from torch_geometric.data import Data
 
 from src import solid
 from args import parse_args
@@ -297,6 +298,117 @@ def evaluate_and_visualize(nettack_ready, nettack, attack_config, retrain_iters=
     plt.tight_layout()
     plt.show()
     plt.savefig("nettack_attack_result.png", dpi=300)
+
+# ======================== 新增封装5：Nettack扰动数据 → PyG Data对象（核心功能） ========================
+def nettack_to_pyg_format(nettack, original_data_info, return_full_graph=True):
+    """
+    将Nettack攻击后的扰动数据转换回PyG的Data对象格式
+    Args:
+        nettack (ntk.Nettack): 执行完攻击的Nettack对象（包含扰动结果）
+        original_data_info (dict): 原始数据信息（从prepare_nettack返回）
+        return_full_graph (bool): 是否还原为原始规模图（补全非LCC节点），False返回LCC规模图
+    Returns:
+        pyg_data_perturbed (torch_geometric.data.Data): 扰动后的PyG Data对象
+    """
+    # 1. 提取Nettack扰动后的核心数据（scipy格式）
+    # 扰动后的邻接矩阵（结构扰动）
+    A_pert_scipy = nettack.A_pert.tocsr()
+    # 扰动后的特征矩阵（特征扰动）
+    X_pert_scipy = nettack.X_obs.tocsr()
+    # 扰动后的标签（LCC内，无扰动，仅用于还原）
+    z_pert_lcc = nettack.z_obs
+
+    # 2. 核心转换：scipy稀疏矩阵 → PyG张量格式
+    # 邻接矩阵 → edge_index（PyG标准边索引格式）
+    edge_index_pert, _ = from_scipy_sparse_matrix(A_pert_scipy)
+    # 特征矩阵 → x（PyG节点特征张量）
+    x_pert = torch.tensor(X_pert_scipy.toarray(), dtype=torch.float32)
+    # 标签 → y（PyG标签张量）
+    y_pert_lcc = torch.tensor(z_pert_lcc, dtype=torch.long).unsqueeze(1)
+
+    # 3. 还原mask（LCC内，基于原始mask映射）
+    lcc = original_data_info["lcc"]
+    original_masks = original_data_info["original_masks"]
+    original_to_lcc = original_data_info["original_to_lcc"]
+
+    # 提取原始mask并映射到LCC内
+    lcc_train_mask = np.zeros(A_pert_scipy.shape[0], dtype=bool)
+    lcc_val_mask = np.zeros(A_pert_scipy.shape[0], dtype=bool)
+    lcc_test_mask = np.zeros(A_pert_scipy.shape[0], dtype=bool)
+
+    original_train_nodes = np.where(original_masks["train_mask"])[0]
+    original_val_nodes = np.where(original_masks["val_mask"])[0]
+    original_test_nodes = np.where(original_masks["test_mask"])[0]
+
+    # 填充LCC内的mask
+    for node in original_train_nodes:
+        if node in original_to_lcc:
+            lcc_train_mask[original_to_lcc[node]] = True
+    for node in original_val_nodes:
+        if node in original_to_lcc:
+            lcc_val_mask[original_to_lcc[node]] = True
+    for node in original_test_nodes:
+        if node in original_to_lcc:
+            lcc_test_mask[original_to_lcc[node]] = True
+
+    # 转换为PyG张量格式mask
+    train_mask_pert = torch.tensor(lcc_train_mask, dtype=torch.bool)
+    val_mask_pert = torch.tensor(lcc_val_mask, dtype=torch.bool)
+    test_mask_pert = torch.tensor(lcc_test_mask, dtype=torch.bool)
+
+    # 4. 构建LCC规模的PyG Data对象
+    pyg_data_lcc = Data(
+        x=x_pert,
+        edge_index=edge_index_pert,
+        y=y_pert_lcc,
+        train_mask=train_mask_pert,
+        val_mask=val_mask_pert,
+        test_mask=test_mask_pert,
+        num_nodes=x_pert.shape[0]
+    )
+
+    # 5. 可选：还原为原始规模图（补全非LCC节点，保持与原始图节点数一致）
+    if return_full_graph:
+        original_node_count = original_data_info["original_node_count"]
+        original_z_obs = original_data_info["original_z_obs"]
+
+        # 补全特征矩阵（非LCC节点用0填充）
+        x_full = torch.zeros((original_node_count, x_pert.shape[1]), dtype=torch.float32)
+        x_full[lcc] = x_pert
+
+        # 补全标签（非LCC节点保留原始标签）
+        y_full = torch.tensor(original_z_obs, dtype=torch.long).unsqueeze(1)
+
+        # 补全mask（非LCC节点设为False）
+        train_mask_full = torch.zeros(original_node_count, dtype=torch.bool)
+        val_mask_full = torch.zeros(original_node_count, dtype=torch.bool)
+        test_mask_full = torch.zeros(original_node_count, dtype=torch.bool)
+        train_mask_full[lcc] = train_mask_pert
+        val_mask_full[lcc] = val_mask_pert
+        test_mask_full[lcc] = test_mask_pert
+
+        # 构建原始规模的PyG Data对象
+        pyg_data_perturbed = Data(
+            x=x_full,
+            edge_index=edge_index_pert,  # 仅LCC内有边，非LCC节点为孤立节点
+            y=y_full,
+            train_mask=train_mask_full,
+            val_mask=val_mask_full,
+            test_mask=test_mask_full,
+            num_nodes=original_node_count
+        )
+    else:
+        pyg_data_perturbed = pyg_data_lcc
+
+    # 6. 验证转换结果
+    print(f"\n扰动数据转换为PyG格式完成：")
+    print(f"- 节点数：{pyg_data_perturbed.num_nodes}")
+    print(f"- 特征维度：{pyg_data_perturbed.x.shape}")
+    print(f"- 边数：{pyg_data_perturbed.edge_index.shape[1]}")
+    print(f"- 训练集大小：{pyg_data_perturbed.train_mask.sum().item()}")
+
+    return pyg_data_perturbed
+
 
 # ======================== 新增封装5：批量攻击测试集节点并统计成功率 ========================
 def batch_attack_test_nodes(_A_obs, _X_obs, _z_obs, masks, gpu_id=None, 

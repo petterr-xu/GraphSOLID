@@ -14,7 +14,7 @@ from sklearn.model_selection import train_test_split
 import scipy.sparse as sp
 from scipy.sparse.csgraph import connected_components
 
-
+tf.compat.v1.disable_eager_execution()
 def load_npz(file_name):
     """Load a SparseGraph from a Numpy binary file.
     Parameters
@@ -227,7 +227,7 @@ def compute_log_likelihood(n, alpha, sum_log_degrees, d_min):
         The log likelihood of the given observed Powerlaw distribution and exponend alpha.
 
     """
-    return n * tf.log(alpha) + n * alpha * tf.log(d_min) - (alpha + 1) * sum_log_degrees
+    return n * tf.math.log(alpha) + n * alpha * tf.math.log(d_min) - (alpha + 1) * sum_log_degrees
 
 
 def update_sum_log_degrees(sum_log_degrees_before, n_old, d_old, d_new, d_min):
@@ -275,12 +275,12 @@ def update_sum_log_degrees(sum_log_degrees_before, n_old, d_old, d_new, d_min):
     d_new_in_range = tf.multiply(d_new, tf.cast(new_in_range, tf.float32))
 
     # Update the sum by subtracting the old values and then adding the updated logs of the degrees.
-    sum_log_degrees_after = sum_log_degrees_before - tf.reduce_sum(tf.log(tf.maximum(d_old_in_range, 1)),
+    sum_log_degrees_after = sum_log_degrees_before - tf.reduce_sum(tf.math.log(tf.maximum(d_old_in_range, 1)),
                                                                    axis=1) + tf.reduce_sum(
-        tf.log(tf.maximum(d_new_in_range, 1)), axis=1)
+        tf.math.log(tf.maximum(d_new_in_range, 1)), axis=1)
 
     # Update the number of degrees >= d_min
-    new_n = tf.cast(n_old, tf.int64) - tf.count_nonzero(old_in_range, axis=1) + tf.count_nonzero(new_in_range, axis=1)
+    new_n = tf.cast(n_old, tf.int64) - tf.math.count_nonzero(old_in_range, axis=1) + tf.math.count_nonzero(new_in_range, axis=1)
 
     return sum_log_degrees_after, new_n
 
@@ -306,7 +306,7 @@ def compute_alpha(n, sum_log_degrees, d_min):
         The maximum likelihood estimate of the Powerlaw exponent alpha.
 
     """
-    return n / (sum_log_degrees - n * tf.log(d_min - 0.5)) + 1
+    return n / (sum_log_degrees - n * tf.math.log(d_min - 0.5)) + 1
 
 
 def degree_sequence_log_likelihood(degree_sequence, d_min):
@@ -339,9 +339,9 @@ def degree_sequence_log_likelihood(degree_sequence, d_min):
     # Determine which degrees are to be considered, i.e. >= d_min.
     in_range = tf.greater_equal(degree_sequence, d_min)
     # Sum the log of the degrees to be considered
-    sum_log_degrees = tf.reduce_sum(tf.log(tf.boolean_mask(degree_sequence, in_range)))
+    sum_log_degrees = tf.reduce_sum(tf.math.log(tf.boolean_mask(degree_sequence, in_range)))
     # Number of degrees >= d_min
-    n = tf.cast(tf.count_nonzero(in_range), tf.float32)
+    n = tf.cast(tf.math.count_nonzero(in_range), tf.float32)
     # Maximum likelihood estimate of the Powerlaw exponent
     alpha = compute_alpha(n, sum_log_degrees, d_min)
     # Log likelihood under alpha
@@ -392,9 +392,9 @@ def updated_log_likelihood_for_edge_changes(node_pairs, adjacency_matrix, d_min)
     # Determine which degrees are to be considered, i.e. >= d_min.
     in_range = tf.greater_equal(degree_seq, d_min)
     # Sum the log of the degrees to be considered
-    sum_log_degrees = tf.reduce_sum(tf.log(tf.boolean_mask(degree_seq, in_range)))
+    sum_log_degrees = tf.reduce_sum(tf.math.log(tf.boolean_mask(degree_seq, in_range)))
     # Number of degrees >= d_min
-    n = tf.cast(tf.count_nonzero(in_range), tf.float32)
+    n = tf.cast(tf.math.count_nonzero(in_range), tf.float32)
 
     # The changes to the edge entries to add an edge if none was present and remove it otherwise.
     # i.e., deltas[ix] = -1 if edge_entries[ix] == 1 else 1

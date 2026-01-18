@@ -10,15 +10,17 @@ Technical University of Munich
 
 import tensorflow as tf
 import numpy as np
-from metattack import utils
+from . import utils
 import scipy.sparse as sp
-from tensorflow.contrib import slim
+import tf_slim as slim
 
 try:
     from tqdm import tqdm
 except ImportError:
     tqdm = lambda x, desc=None: x
 
+
+tf.compat.v1.disable_eager_execution()
 
 class GNNAttack:
     """
@@ -65,9 +67,9 @@ class GNNAttack:
         with self.graph.as_default():
 
             self.labels_onehot = labels_onehot
-            self.idx_labeled = tf.placeholder(dtype=tf.int32, shape=[None, ], name="Labeled_Idx")
-            self.idx_unlabeled = tf.placeholder(dtype=tf.int32, shape=[None, ], name="Unlabeled_Idx")
-            self.idx_attack = tf.placeholder(dtype=tf.int32, shape=[None, ], name="Attack_Idx")
+            self.idx_labeled = tf.compat.v1.placeholder(dtype=tf.int32, shape=[None, ], name="Labeled_Idx")
+            self.idx_unlabeled = tf.compat.v1.placeholder(dtype=tf.int32, shape=[None, ], name="Unlabeled_Idx")
+            self.idx_attack = tf.compat.v1.placeholder(dtype=tf.int32, shape=[None, ], name="Attack_Idx")
             self.attack_features = attack_features
 
             if sp.issparse(adjacency_matrix):
@@ -94,9 +96,9 @@ class GNNAttack:
 
             previous_size = self.D
             for ix, layer_size in enumerate(self.hidden_sizes):
-                weight = tf.get_variable(f"W_{ix + 1}", shape=[previous_size, layer_size], dtype=self.dtype,
+                weight = tf.compat.v1.get_variable(f"W_{ix + 1}", shape=[previous_size, layer_size], dtype=self.dtype,
                                          initializer=w_init())
-                bias = tf.get_variable(f"b_{ix + 1}", shape=[layer_size], dtype=self.dtype,
+                bias = tf.compat.v1.get_variable(f"b_{ix + 1}", shape=[layer_size], dtype=self.dtype,
                                        initializer=w_init())
                 w_velocity = tf.Variable(np.zeros(weight.shape), dtype=self.dtype, name=f"Velocity_{ix + 1}")
                 b_velocity = tf.Variable(np.zeros(bias.shape), dtype=self.dtype, name=f"b_Velocity_{ix + 1}")
@@ -106,10 +108,10 @@ class GNNAttack:
                 biases.append(bias)
                 previous_size = layer_size
 
-            output_weight = tf.get_variable(f"W_{len(self.hidden_sizes) + 1}", shape=[previous_size, self.K],
+            output_weight = tf.compat.v1.get_variable(f"W_{len(self.hidden_sizes) + 1}", shape=[previous_size, self.K],
                                             dtype=self.dtype,
                                             initializer=w_init())
-            output_bias = tf.get_variable(f"b_{len(self.hidden_sizes) + 1}", shape=[self.K], dtype=self.dtype,
+            output_bias = tf.compat.v1.get_variable(f"b_{len(self.hidden_sizes) + 1}", shape=[self.K], dtype=self.dtype,
                                           initializer=w_init())
             output_velocity = tf.Variable(np.zeros(output_weight.shape), dtype=self.dtype,
                                           name=f"Velocity_{len(self.hidden_sizes) + 1}")
@@ -129,7 +131,7 @@ class GNNAttack:
                                                      name="Adjacency_delta")
 
                 # reshape to [N, N] and set the diagonal to 0
-                tf_adjacency_square = tf.matrix_set_diag(tf.reshape(self.adjacency_changes, adjacency_matrix.shape),
+                tf_adjacency_square = tf.linalg.set_diag(tf.reshape(self.adjacency_changes, adjacency_matrix.shape),
                                                          tf.zeros(adjacency_matrix.shape[0], dtype=self.dtype))
 
                 # Symmetrize and clip to [-1,1]
@@ -138,7 +140,7 @@ class GNNAttack:
 
                 self.modified_adjacency = self.adjacency_orig + tf_adjacency_delta_symm
 
-                adj_selfloops = tf.add(self.modified_adjacency, tf.diag(tf.ones([self.N], dtype=self.dtype)))
+                adj_selfloops = tf.add(self.modified_adjacency, tf.linalg.diag(tf.ones([self.N], dtype=self.dtype)))
                 inv_degrees = tf.pow(tf.reduce_sum(adj_selfloops, axis=0), -0.5)
                 self.adj_norm = tf.multiply(tf.multiply(adj_selfloops, inv_degrees[:, None]),
                                             inv_degrees[None, :], name="normalized_adjacency")
@@ -167,14 +169,14 @@ class GNNAttack:
             self.all_velocities_bias = [[w for w in bias_velocities]]
 
             if gpu_id is None:
-                config = tf.ConfigProto(
+                config = tf.compat.v1.ConfigProto(
                     device_count={'GPU': 0}
                 )
             else:
-                gpu_options = tf.GPUOptions(visible_device_list='{}'.format(gpu_id), allow_growth=True)
-                config = tf.ConfigProto(gpu_options=gpu_options)
+                gpu_options = tf.compat.v1.GPUOptions(visible_device_list='{}'.format(gpu_id), allow_growth=True)
+                config = tf.compat.v1.ConfigProto(gpu_options=gpu_options)
 
-            session = tf.Session(config=config)
+            session = tf.compat.v1.Session(config=config)
             self.session = session
 
     def filter_potential_singletons(self):
@@ -300,11 +302,11 @@ class GNNMetaApprox(GNNAttack):
                 b = bias[ix]*float(with_bias)
                 if ix == 0 and self.sparse_attributes:
                     if self.dtype != tf.float32:  # sparse matmul is unfortunately not implemented for float16
-                        hidden = self.adj_norm @ tf.cast(tf.sparse_tensor_dense_matmul(tf.cast(hidden, tf.float32),
+                        hidden = self.adj_norm @ tf.cast(tf.sparse.sparse_dense_matmul(tf.cast(hidden, tf.float32),
                                                                                        tf.cast(w, tf.float32)),
                                                          self.dtype) + b
                     else:
-                        hidden = self.adj_norm @ tf.sparse_tensor_dense_matmul(hidden, w) + b
+                        hidden = self.adj_norm @ tf.sparse.sparse_dense_matmul(hidden, w) + b
                 else:
                     hidden = self.adj_norm @ hidden @ w + b
                 if with_relu:
@@ -314,12 +316,12 @@ class GNNMetaApprox(GNNAttack):
 
             labels_gather = tf.gather(self.labels_onehot, self.idx_labeled)
             logits_gather = tf.gather(self.logits, self.idx_labeled)
-            self.classification_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=labels_gather,
+            self.classification_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=labels_gather,
                                                                                                  logits=logits_gather))
             epsilon = 1e-8
             if self.dtype == tf.float16:
                 epsilon = 1e-4  # improve numerical stability for half precision
-            self.optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate, epsilon=epsilon)
+            self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate, epsilon=epsilon)
             self.train_op = self.optimizer.minimize(self.classification_loss, var_list=[*self.all_weights[0],
                                                                                         *self.all_biases[0]])
 
@@ -345,9 +347,9 @@ class GNNMetaApprox(GNNAttack):
             logits_attack = tf.gather(self.logits, self.idx_unlabeled)
             labels_attack = tf.gather(self.labels_onehot, self.idx_attack)
 
-            loss_labeled = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits_labeled,
+            loss_labeled = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits_labeled,
                                                                                      labels=labels_train))
-            loss_attack = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits_attack,
+            loss_attack = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits_attack,
                                                                                        labels=labels_attack))
 
             if self.lambda_ == 1:
@@ -360,11 +362,11 @@ class GNNMetaApprox(GNNAttack):
             # This variable "stores" the gradients of every inner training step.
             self.grad_sum = tf.Variable(np.zeros(self.N * self.N), dtype=self.dtype)
 
-            self.adjacency_grad = tf.multiply(tf.gradients(attack_loss, self.adjacency_changes)[0],
+            self.adjacency_grad = tf.multiply(tf.compat.v1.gradients(attack_loss, self.adjacency_changes)[0],
                                               tf.reshape(self.modified_adjacency, [-1]) * -2 + 1,
                                               name="Adj_gradient")
             # Add the current gradient to the sum.
-            self.grad_sum_add = tf.assign_add(self.grad_sum, self.adjacency_grad)
+            self.grad_sum_add = tf.compat.v1.assign_add(self.grad_sum, self.adjacency_grad)
 
             # Make sure that the minimum entry is 0.
             self.grad_sum_mod = self.grad_sum - tf.reduce_min(self.grad_sum)
@@ -393,7 +395,7 @@ class GNNMetaApprox(GNNAttack):
                                            name="Meta_approx_argmax_combined")
 
             # Add the change to the perturbations.
-            self.adjacency_update = tf.scatter_add(self.adjacency_changes,
+            self.adjacency_update = tf.compat.v1.scatter_add(self.adjacency_changes,
                                                    indices=adj_argmax_combined,
                                                    updates=-2 * tf.gather(
                                                             tf.reshape(self.modified_adjacency, [-1]),
@@ -423,7 +425,7 @@ class GNNMetaApprox(GNNAttack):
         """
         with self.graph.as_default():
             if initialize:
-                self.session.run(tf.global_variables_initializer())
+                self.session.run(tf.compat.v1.global_variables_initializer())
 
             weights = [w for v in self.all_weights for w in v]
             biases = [b for v in self.all_biases for b in v]
@@ -520,20 +522,20 @@ class GNNMeta(GNNAttack):
                     for ix, w in enumerate(current_weights):
                         b = current_biases[ix] * float(with_bias)
                         if ix == 0 and self.sparse_attributes:
-                            hidden = self.adj_norm @ tf.sparse_tensor_dense_matmul(hidden, w) + b
+                            hidden = self.adj_norm @ tf.sparse.sparse_dense_matmul(hidden, w) + b
                         else:
                             hidden = self.adj_norm @ hidden @ w + b
                         if with_relu:
                             hidden = tf.nn.relu(hidden)
 
                     logits_train = tf.gather(hidden, self.idx_labeled)
-                    loss_per_node = tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits_train,
+                    loss_per_node = tf.nn.softmax_cross_entropy_with_logits(logits=logits_train,
                                                                                labels=tf.gather(self.labels_onehot,
                                                                                                 self.idx_labeled))
                     loss = tf.reduce_mean(loss_per_node)
 
-                    weight_grads = tf.gradients(loss, current_weights)
-                    bias_grads = tf.gradients(loss, current_biases)
+                    weight_grads = tf.compat.v1.gradients(loss, current_weights)
+                    bias_grads = tf.compat.v1.gradients(loss, current_biases)
                     next_velocities = [momentum * current_v + weight_grads[ix] for ix, current_v in
                                        enumerate(current_velocities)]
                     next_b_velocities = [momentum * v + bias_grads[ix] for ix, v in enumerate(current_velocities_bias)]
@@ -556,7 +558,7 @@ class GNNMeta(GNNAttack):
             for ix, w in enumerate(final_weights):
                 b = final_bias[ix] * float(with_bias)
                 if ix == 0 and self.sparse_attributes:
-                    final_output = self.adj_norm @ tf.sparse_tensor_dense_matmul(final_output, w) + b
+                    final_output = self.adj_norm @ tf.sparse.sparse_dense_matmul(final_output, w) + b
                 else:
                     final_output = self.adj_norm @ final_output @ w + b
                 if with_relu:
@@ -582,12 +584,12 @@ class GNNMeta(GNNAttack):
 
             logits_attack = tf.gather(self.logits_final, self.idx_attack)
             labels_atk = tf.gather(self.labels_onehot, self.idx_attack)
-            attack_loss_per_node = tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits_attack,
+            attack_loss_per_node = tf.nn.softmax_cross_entropy_with_logits(logits=logits_attack,
                                                                               labels=labels_atk)
             attack_loss = tf.reduce_mean(attack_loss_per_node)
 
             # Meta gradient computation.
-            self.adjacency_meta_grad = tf.multiply(tf.gradients(attack_loss, self.adjacency_changes)[0],
+            self.adjacency_meta_grad = tf.multiply(tf.compat.v1.gradients(attack_loss, self.adjacency_changes)[0],
                                                    tf.reshape(self.modified_adjacency, [-1]) * -2 + 1,
                                                    name="Meta_gradient")
 
@@ -618,7 +620,7 @@ class GNNMeta(GNNAttack):
                                            name="Meta_grad_argmax_combined")
 
             # Add the change to the perturbations.
-            self.adjacency_meta_update = tf.scatter_add(self.adjacency_changes,
+            self.adjacency_meta_update = tf.compat.v1.scatter_add(self.adjacency_changes,
                                                         indices=adj_argmax_combined,
                                                         updates=-2 * tf.gather(
                                                             tf.reshape(self.modified_adjacency, [-1]),
@@ -626,13 +628,13 @@ class GNNMeta(GNNAttack):
 
             if self.attack_features:
                 # Get meta gradients of the attributes.
-                self.attribute_meta_grad = tf.multiply(tf.gradients(attack_loss, self.attribute_changes)[0],
+                self.attribute_meta_grad = tf.multiply(tf.compat.v1.gradients(attack_loss, self.attribute_changes)[0],
                                                        tf.reshape(self.attributes, [-1]) * -2 + 1)
                 self.attribute_meta_grad -= tf.reduce_min(self.attribute_meta_grad)
 
                 attribute_meta_grad_argmax = tf.argmax(self.attribute_meta_grad)
 
-                self.attribute_meta_update = tf.scatter_add(self.attribute_changes,
+                self.attribute_meta_update = tf.compat.v1.scatter_add(self.attribute_changes,
                                                             indices=attribute_meta_grad_argmax,
                                                             updates=-2 * tf.gather(
                                                                 tf.reshape(self.attributes, [-1]),
@@ -670,7 +672,7 @@ class GNNMeta(GNNAttack):
 
         with self.graph.as_default():
             if initialize:
-                self.session.run(tf.global_variables_initializer())
+                self.session.run(tf.compat.v1.global_variables_initializer())
 
             for _it in tqdm(range(perturbations), desc="Perturbing graph"):
                 self.session.run(self.adjacency_meta_update,
@@ -680,9 +682,9 @@ class GNNMeta(GNNAttack):
 def sparse_dropout(x, keep_prob, noise_shape):
     """Dropout for sparse tensors."""
     random_tensor = keep_prob
-    random_tensor += tf.random_uniform(noise_shape)
+    random_tensor += tf.random.uniform(noise_shape)
     dropout_mask = tf.cast(tf.floor(random_tensor), dtype=tf.bool)
-    pre_out = tf.sparse_retain(x, dropout_mask)
+    pre_out = tf.sparse.retain(x, dropout_mask)
     return pre_out * (1./keep_prob)
 
                 
@@ -737,9 +739,9 @@ class GCNSparse:
         self.weight_decay = weight_decay
 
         with self.graph.as_default():
-            self.training = tf.placeholder_with_default(False, shape=())
+            self.training = tf.compat.v1.placeholder_with_default(False, shape=())
 
-            self.idx = tf.placeholder(tf.int32, shape=[None])
+            self.idx = tf.compat.v1.placeholder(tf.int32, shape=[None])
             self.labels_onehot = labels_onehot
 
             adj_norm = utils.preprocess_graph(adjacency_matrix).astype("float32")
@@ -766,32 +768,32 @@ class GCNSparse:
 
             previous_size = self.D
             for ix, layer_size in enumerate(self.hidden_sizes):
-                weight = tf.get_variable(f"W_{ix + 1}", shape=[previous_size, layer_size], dtype=tf.float32,
+                weight = tf.compat.v1.get_variable(f"W_{ix + 1}", shape=[previous_size, layer_size], dtype=tf.float32,
                                          initializer=w_init())
-                bias = tf.get_variable(f"b_{ix + 1}", shape=[layer_size], dtype=tf.float32,
+                bias = tf.compat.v1.get_variable(f"b_{ix + 1}", shape=[layer_size], dtype=tf.float32,
                                        initializer=w_init())
                 self.weights.append(weight)
                 self.biases.append(bias)
                 previous_size = layer_size
                 
-            weight_final = tf.get_variable(f"W_{len(hidden_sizes) + 1}", shape=[previous_size, self.K],
+            weight_final = tf.compat.v1.get_variable(f"W_{len(hidden_sizes) + 1}", shape=[previous_size, self.K],
                                            dtype=tf.float32,
                                            initializer=w_init())
-            bias_final = tf.get_variable(f"b_{len(hidden_sizes) + 1}", shape=[self.K], dtype=tf.float32,
+            bias_final = tf.compat.v1.get_variable(f"b_{len(hidden_sizes) + 1}", shape=[self.K], dtype=tf.float32,
                                          initializer=w_init())
 
             self.weights.append(weight_final)
             self.biases.append(bias_final)
 
             if gpu_id is None:
-                config = tf.ConfigProto(
+                config = tf.compat.v1.ConfigProto(
                     device_count={'GPU': 0}
                 )
             else:
-                gpu_options = tf.GPUOptions(visible_device_list='{}'.format(gpu_id), allow_growth=True)
-                config = tf.ConfigProto(gpu_options=gpu_options)
+                gpu_options = tf.compat.v1.GPUOptions(visible_device_list='{}'.format(gpu_id), allow_growth=True)
+                config = tf.compat.v1.ConfigProto(gpu_options=gpu_options)
 
-            session = tf.Session(config=config)
+            session = tf.compat.v1.Session(config=config)
             self.session = session
 
             self.logits = None
@@ -808,10 +810,10 @@ class GCNSparse:
                 w = self.weights[ix]
                 b = self.biases[ix]
                 if ix == 0 and self.sparse_attributes:
-                    hidden = tf.sparse_tensor_dense_matmul(self.adj_norm,
-                                                           tf.sparse_tensor_dense_matmul(self.attrs_comp, w)) + b
+                    hidden = tf.sparse.sparse_dense_matmul(self.adj_norm,
+                                                           tf.sparse.sparse_dense_matmul(self.attrs_comp, w)) + b
                 else:
-                    hidden = tf.sparse_tensor_dense_matmul(self.adj_norm, self.attrs_comp @ w) + b
+                    hidden = tf.sparse.sparse_dense_matmul(self.adj_norm, self.attrs_comp @ w) + b
 
                 if with_relu:
                     hidden = tf.nn.relu(hidden)
@@ -822,21 +824,21 @@ class GCNSparse:
                                    lambda: hidden) if self.dropout > 0. else hidden
 
 
-            self.logits = tf.sparse_tensor_dense_matmul(self.adj_norm, hidden @ self.weights[-1]) + self.biases[-1]
+            self.logits = tf.sparse.sparse_dense_matmul(self.adj_norm, hidden @ self.weights[-1]) + self.biases[-1]
             self.logits_gather = tf.gather(self.logits, self.idx)
             labels_gather = tf.gather(self.labels_onehot, self.idx)
             
-            self.loss = tf.nn.softmax_cross_entropy_with_logits_v2(labels=labels_gather, logits=self.logits_gather)
+            self.loss = tf.nn.softmax_cross_entropy_with_logits(labels=labels_gather, logits=self.logits_gather)
             self.loss += self.weight_decay * tf.add_n([tf.nn.l2_loss(v) for v in [self.weights[0], self.biases[0]]])
             
-            self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
+            self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=self.learning_rate)
             self.train_op = self.optimizer.minimize(self.loss, var_list=[*self.weights, *self.biases])
-            self.initializer = tf.local_variables_initializer()
+            self.initializer = tf.compat.v1.local_variables_initializer()
 
     def train(self, idx_train, n_iters=200, initialize=True, display=True):
         with self.graph.as_default():
             if initialize:
-                self.session.run(tf.global_variables_initializer())
+                self.session.run(tf.compat.v1.global_variables_initializer())
 
             _iter = range(n_iters)
             if display:
