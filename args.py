@@ -66,5 +66,8 @@ def parse_args():
     parser.add_argument('--noise_dist_params', type=dict, default={"P_mean": -1.2, "P_std": 1.2})
     parser.add_argument('--noise_schedule_params', type=dict, default={"sigma_min": 0.002, "sigma_max": 80, "rho": 7, "eps_max": 1e-3, "eps_min": 1e-5, "rho_init": 7.0, "rho_offset": 5.0, "k_init":-6.0, "k_offset":1.0})
 
+    ## digress setup
+    
+
     args = parser.parse_args()
     return args
