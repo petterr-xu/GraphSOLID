@@ -193,3 +193,56 @@ class TrainMolecularMetricsDiscrete(nn.Module):
 
         return epoch_atom_metrics, epoch_bond_metrics
 
+class SimpleTrainMetrics(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # 用于累计每个 Epoch 的正确数和总数
+        self.reset()
+
+    def reset(self):
+        """每个 Epoch 开始时重置计数器"""
+        self.node_correct = 0
+        self.node_total = 0
+        self.edge_correct = 0
+        self.edge_total = 0
+
+    def forward(self, pred_X, pred_E, true_X, true_E, log=False):
+        """
+        在每个 batch 计算并累计准确率
+        Args:
+            pred_X: 模型预测的节点 logits (Batch, N, Num_Node_Classes)
+            pred_E: 模型预测的边 logits (Batch, N, N, Num_Edge_Classes)
+            true_X: 真实的节点 One-Hot (Batch, N, Num_Node_Classes)
+            true_E: 真实的边 One-Hot (Batch, N, N, Num_Edge_Classes)
+        """
+        # --- 1. 计算节点准确率 ---
+        # 取最大值索引作为预测类别
+        pred_x_cls = pred_X.argmax(dim=-1) 
+        true_x_cls = true_X.argmax(dim=-1)
+        
+        # 累计正确数和总数
+        self.node_correct += (pred_x_cls == true_x_cls).sum().item()
+        self.node_total += true_x_cls.numel()
+
+        # --- 2. 计算边准确率 ---
+        pred_e_cls = pred_E.argmax(dim=-1)
+        true_e_cls = true_E.argmax(dim=-1)
+        
+        self.edge_correct += (pred_e_cls == true_e_cls).sum().item()
+        self.edge_total += true_e_cls.numel()
+
+    def log_epoch_metrics(self):
+        """Epoch 结束时调用，返回统计结果"""
+        # 防止除以零
+        node_acc = self.node_correct / self.node_total if self.node_total > 0 else 0.0
+        edge_acc = self.edge_correct / self.edge_total if self.edge_total > 0 else 0.0
+
+        metrics = {
+            "train_epoch/node_acc": node_acc,
+            "train_epoch/edge_acc": edge_acc
+        }
+        
+        # 重置以便下一个 Epoch 使用
+        self.reset()
+        
+        return metrics, metrics # 返回两遍是为了保持和源代码的接口一致性

@@ -64,6 +64,8 @@ metapath = [('review','rur','review'),('review','rsr', 'review')]
 homo = graphbuilder.extract_view_by_transform(ctx.g, metapath, target)
 print(homo)
 
+
+
 # denoise_nhid = n_feat
 # denoise_kwargs = {
 #     "feature_length": denoise_nhid,
