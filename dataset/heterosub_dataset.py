@@ -54,15 +54,18 @@ class HeteroSubgraphDataset(InMemoryDataset):
         all_subgraphs = []
         for i in range(self.num_parts):
             sub_homo = cluster_data[i]
+            if hasattr(sub_homo, 'node_type') and not isinstance(sub_homo.node_type, torch.Tensor):
+                sub_homo.node_type = torch.tensor(sub_homo.node_type)
+            if hasattr(sub_homo, 'edge_type') and not isinstance(sub_homo.edge_type, torch.Tensor):
+                sub_homo.edge_type = torch.tensor(sub_homo.edge_type)
             # 还原为异构
-            sub_hetero = sub_homo.to_heterogeneous(node_types, edge_types)
+            sub_hetero = sub_homo.to_heterogeneous(
+                node_type_names=node_types,
+                edge_type_names=edge_types
+            )
             
             # --- 这里添加你的图标签逻辑 ---
-            # 假设你以子图内第一个 paper 节点的标签作为全图标签
-            if 'paper' in sub_hetero.node_types and hasattr(sub_hetero['paper'], 'y'):
-                if sub_hetero['paper'].y.numel() > 0:
-                    sub_hetero.y = sub_hetero['paper'].y[0].view(1) # 保证形状为 [1]
-                    all_subgraphs.append(sub_hetero)
+            all_subgraphs.append(sub_hetero)
 
         # 3. 随机划分数据集
         random.shuffle(all_subgraphs)
