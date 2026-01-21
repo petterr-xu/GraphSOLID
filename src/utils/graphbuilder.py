@@ -5,6 +5,8 @@ from torch_sparse import SparseTensor
 from torch_geometric.data import Data
 import torch_geometric.transforms as T
 from torch_geometric.data import HeteroData
+from torch_geometric.loader import ClusterData, ClusterLoader
+from torch_geometric.utils import to_dense_batch
 
 
 def make_longtailed_data_remove(edge_index, label, n_data, n_cls, ratio, train_mask, max_n=500):
@@ -299,3 +301,53 @@ def extract_view_by_matrix(pyg_graph, metapath_steps, target_node):
             setattr(view_data, mask, getattr(pyg_graph[target_node], mask))
             
     return view_data
+
+def hetero_cluster_split(data:HeteroData, num_parts = 100):
+    print("1. 准备元数据 (用于后续还原)")
+    # 我们需要记录原始的元数据，以便将同构图还原
+    node_types = data.node_types
+    edge_types = data.edge_types
+    metadata = data.metadata()
+
+    print("2. 转换为同构图 (Homogeneous)")
+    # to_homogeneous 会自动创建 'node_type' 和 'edge_type' 属性，
+    # 这是后续还原的关键。
+    homo_data = data.to_homogeneous()
+
+    print("3. 执行 METIS 图分割")
+    cluster_data = ClusterData(homo_data, num_parts=num_parts, recursive=False)
+
+    # 使用 ClusterLoader 来提取子图
+    # batch_size=1 意味着每次吐出一个完整的 partition 子图
+    loader = ClusterLoader(cluster_data, batch_size=1, shuffle=True)
+
+    print("4. 还原为异构子图并构建数据集")
+    subgraph_list = []
+
+    for step, sub_homo_batch in enumerate(loader):
+        # sub_homo_batch 是切分出来的一个同构子图
+        
+        # 【核心步骤】：将同构子图还原回异构图
+        # PyG 的 to_heterogeneous 需要依据原始的 metadata 进行映射
+        sub_hetero_data = sub_homo_batch.to_heterogeneous(
+            node_type_names=node_types,
+            edge_type_names=edge_types
+        )
+        
+        subgraph_list.append(sub_hetero_data)
+
+    print(f"成功切分出 {len(subgraph_list)} 个异构子图")
+
+    # 5. 划分 Train / Val / Test
+    import random
+    random.shuffle(subgraph_list)
+
+    n = len(subgraph_list)
+    train_split = int(n * 0.8)
+    val_split = int(n * 0.1)
+
+    train_dataset = subgraph_list[:train_split]
+    val_dataset = subgraph_list[train_split : train_split + val_split]
+    test_dataset = subgraph_list[train_split + val_split:]
+
+    print(f"训练集: {len(train_dataset)}, 验证集: {len(val_dataset)}, 测试集: {len(test_dataset)}")
