@@ -70,20 +70,7 @@ if args.dataset in ['YelpChi', 'Amazon-Products']:
 else:
     raise NotImplementedError("Not implemented for dataset {}".format(args.dataset))
 num_parts=200
-# 1. 实例化训练集 (如果是第一次运行，会触发 process 逻辑)
-train_dataset = heterosub_dataset.HeteroSubgraphDataset(root='./data/'+args.dataset+'/subgraph'+str(num_parts), original_data=data, num_parts=num_parts, split='train')
 
-# 2. 实例化验证集和测试集 (此时 process 不会重复运行，而是直接加载已有的文件)
-val_dataset = heterosub_dataset.HeteroSubgraphDataset(root='./data/'+args.dataset+'/subgraph'+str(num_parts), split='val')
-test_dataset = heterosub_dataset.HeteroSubgraphDataset(root='./data/'+args.dataset+'/subgraph'+str(num_parts), split='test')
-# 3. 放入 PyG DataLoader
-from torch_geometric.loader import DataLoader
+from dataset.YelpChi_dataset import *
 
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=32)
-
-for batch in train_loader:
-    # batch 现在是一个包含 32 个异构子图的大 Batch
-    # 可以直接送入模型：out = model(batch.x_dict, batch.edge_index_dict)
-    print(batch)
-    break
+ datamodule = YelpChiSubgraphDataModule()
