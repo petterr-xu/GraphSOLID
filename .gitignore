@@ -5,3 +5,4 @@ __pycache__/
 *.whl
 ckpt/
 history_data/
+torch_geo/

@@ -1,5 +1,5 @@
-from src.diffusion.distributions import DistributionNodes
-import src.utils as utils
+from ..diffusion.distributions import DistributionNodes
+from .. import utils
 import torch
 import pytorch_lightning as pl
 from torch_geometric.loader import DataLoader
