@@ -1,6 +1,7 @@
 import os
 import torch
 import random
+import torch.nn.functional as F
 from torch_geometric.data import InMemoryDataset
 from torch_geometric.loader import ClusterData
 from src.DiGress.src.datasets.abstract_dataset import AbstractDataModule, AbstractDatasetInfos
@@ -42,11 +43,19 @@ class YelpChiSubgraphDataset(InMemoryDataset):
         all_subgraphs = []
         for i in range(self.num_parts):
             sub_homo = cluster_data[i]
-            
+            if hasattr(sub_homo, 'y') and sub_homo.y is not None:
+                y_idx = sub_homo.y.long()
+                sub_homo.x = F.one_hot(y_idx, num_classes=2).float()
+                if sub_homo.x.dim() == 1:
+                    sub_homo.x = sub_homo.x.unsqueeze(-1)
+            else:
+                # 防御性编程：如果没有 y，抛出错误或填充默认值
+                raise ValueError(f"Subgraph {i} does not have 'y' labels!")
             # 再次检查子图 Tensor 状态
             if not isinstance(sub_homo.node_type, torch.Tensor):
                 sub_homo.node_type = torch.tensor(sub_homo.node_type)
-            
+            num_edges = sub_homo.edge_index.size(1)
+            sub_homo.edge_attr = torch.ones(num_edges, 1, dtype=torch.long)
             # 还原为异构图
             if self.is_hetero:
                 sub_g = sub_homo.to_heterogeneous(
