@@ -43,19 +43,29 @@ class YelpChiSubgraphDataset(InMemoryDataset):
         all_subgraphs = []
         for i in range(self.num_parts):
             sub_homo = cluster_data[i]
+            # 使用节点级标签y代替节点属性x
             if hasattr(sub_homo, 'y') and sub_homo.y is not None:
                 y_idx = sub_homo.y.long()
                 sub_homo.x = F.one_hot(y_idx, num_classes=2).float()
                 if sub_homo.x.dim() == 1:
                     sub_homo.x = sub_homo.x.unsqueeze(-1)
             else:
-                # 防御性编程：如果没有 y，抛出错误或填充默认值
                 raise ValueError(f"Subgraph {i} does not have 'y' labels!")
             # 再次检查子图 Tensor 状态
             if not isinstance(sub_homo.node_type, torch.Tensor):
                 sub_homo.node_type = torch.tensor(sub_homo.node_type)
+            # 边属性赋值
             num_edges = sub_homo.edge_index.size(1)
-            sub_homo.edge_attr = torch.ones(num_edges, 1, dtype=torch.long)
+            # 创建一个 [num_edges, 2] 的浮点张量
+            # 索引 0 位留给“无边”，索引 1 位给“有边”
+            edge_attr = torch.zeros((num_edges, 2), dtype=torch.float)
+            # 将所有存在的边标记为类别 1
+            edge_attr[:, 1] = 1.0
+            # 赋值回子图对象
+            sub_homo.edge_attr = edge_attr
+            # 子图级标签赋值
+            y = torch.zeros([1, 0]).float()
+            sub_homo.y = y
             # 还原为异构图
             if self.is_hetero:
                 sub_g = sub_homo.to_heterogeneous(
@@ -101,25 +111,12 @@ class YelpChiSubgraphDataModule(AbstractDataModule):
         super().__init__(cfg, datasets)
 
     def node_types(self):
-        # 1. 确定类别总数
-        # 如果是同构图，类别数通常是 y 的最大值 + 1
-        # 如果是异构图，类别数就是节点类型的数量
-        example_batch = next(iter(self.train_dataloader()))
         
         if not self.is_hetero:
             # 【同构情况】
-            # 假设 y 是节点级的标签索引 [num_nodes]
-            num_classes = int(example_batch.y.max()) + 1
-            counts = torch.zeros(num_classes, dtype=torch.float)
-            
-            for data in self.train_dataloader():
-                # 使用 bincount 统计每个标签出现的次数
-                # 注意：确保 y 是 long 类型
-                node_y = data.y.long()
-                current_counts = torch.bincount(node_y, minlength=num_classes)
-                counts += current_counts
-                
+            return super().node_types()
         else:
+            example_batch = next(iter(self.train_dataloader()))
             # 【异构情况】
             # 此时“节点类型”通常指不同的实体（如 User, Review）
             node_types_list = list(example_batch.x_dict.keys())
