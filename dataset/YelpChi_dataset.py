@@ -4,6 +4,7 @@ import random
 from torch_geometric.data import InMemoryDataset
 from torch_geometric.loader import ClusterData
 from src.DiGress.src.datasets.abstract_dataset import AbstractDataModule, AbstractDatasetInfos
+from src.DiGress.src import utils
 
 class YelpChiSubgraphDataset(InMemoryDataset):
     def __init__(self, stage, root, original_data, is_hetero = False, num_parts=100, transform=None, pre_transform=None):
@@ -168,36 +169,56 @@ class YelpChiSubgraphDatasetInfos(AbstractDatasetInfos):
         
         # 调用父类完成 DistributionNodes 等初始化
         self.complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
-        
-        # 设置输入维度 (针对异构模型，你可能需要根据各个 dict 动态设置)
-        example_batch = next(iter(datamodule.train_dataloader()))
-        if self.is_hetero:
-            # 异构模式：返回各个类型的特征维度字典
-            self.input_dims = {
-                'X': {k: v.size(1) for k, v in example_batch.x_dict.items()},
-                # 边特征维度：如果是异构，通常 edge_attr 也会分散在 edge_attr_dict 中
-                'E': {k: v.size(1) for k, v in example_batch.edge_attr_dict.items()} if hasattr(example_batch, 'edge_attr_dict') else {},
-                # y 维度保持框架要求的格式：原始维度 + 1 (时间步条件)
-                'y': example_batch.y.size(1) + 1
-            }
-        else:
-            # 同构模式：适配标准 Data 对象属性
-            # 使用 getattr 安全获取属性，并检查是否为 None
-            x_attr = getattr(example_batch, 'x', None)
-            e_attr = getattr(example_batch, 'edge_attr', None)
-            # y_attr = getattr(example_batch, 'y', None)
+
+    # def compute_input_output_dims(self, datamodule, extra_features, domain_features):
+    #     # 设置输入维度 (针对异构模型，你可能需要根据各个 dict 动态设置)
+    #     example_batch = next(iter(datamodule.train_dataloader()))
+    #     if self.is_hetero:
+    #         # 异构模式：返回各个类型的特征维度字典
+    #         self.input_dims = {
+    #             'X': {k: v.size(1) for k, v in example_batch.x_dict.items()},
+    #             # 边特征维度：如果是异构，通常 edge_attr 也会分散在 edge_attr_dict 中
+    #             'E': {k: v.size(1) for k, v in example_batch.edge_attr_dict.items()} if hasattr(example_batch, 'edge_attr_dict') else {},
+    #             # y 维度保持框架要求的格式：原始维度 + 1 (时间步条件)
+    #             'y': example_batch.y.size(1) + 1
+    #         }
+    #         self.output_dims = {'X': None, 'E': None, 'y': 0}
+
+    #     else:
+    #         example_batch = next(iter(datamodule.train_dataloader()))
+    #         ex_dense, node_mask = utils.to_dense(example_batch.x, example_batch.edge_index, example_batch.edge_attr,
+    #                                             example_batch.batch)
+    #         example_data = {'X_t': ex_dense.X, 'E_t': ex_dense.E, 'y_t': example_batch['y'], 'node_mask': node_mask}
+
+    #         self.input_dims = {'X': example_batch['x'].size(1),
+    #                         'E': example_batch['edge_attr'].size(1),
+    #                         'y': example_batch['y'].size(1) + 1}      # + 1 due to time conditioning
+    #         ex_extra_feat = extra_features(example_data)
+    #         self.input_dims['X'] += ex_dense.X.size(-1)
+    #         self.input_dims['E'] += ex_extra_feat.E.size(-1)
+    #         self.input_dims['y'] += ex_extra_feat.y.size(-1)
+
+    #         ex_extra_molecular_feat = domain_features(example_data)
+    #         self.input_dims['X'] += ex_extra_molecular_feat.X.size(-1)
+    #         self.input_dims['E'] += ex_extra_molecular_feat.E.size(-1)
+    #         self.input_dims['y'] += ex_extra_molecular_feat.y.size(-1)
+
+    #         self.output_dims = {'X': example_batch['x'].size(1),
+    #                             'E': example_batch['edge_attr'].size(1),
+    #                             'y': 0}
+    #         # 同构模式：适配标准 Data 对象属性
+    #         # 使用 getattr 安全获取属性，并检查是否为 None
+    #         x_attr = getattr(example_batch, 'x', None)
+    #         e_attr = getattr(example_batch, 'edge_attr', None)
+    #         # y_attr = getattr(example_batch, 'y', None)
             
-            self.input_dims = {
-                'X': x_attr.size(1) if x_attr is not None else 0,
-                'E': e_attr.size(1) if e_attr is not None else 0,
-                'y': 0
-            }
-        
-        if not self.is_hetero:
-            self.output_dims = {
-                'X': self.input_dims['X'],
-                'E': self.input_dims['E'],
-                'y': 0
-            }
-        else:
-            self.output_dims = {'X': None, 'E': None, 'y': 0}
+    #         self.input_dims = {
+    #             'X': x_attr.size(1) if x_attr is not None else 0,
+    #             'E': e_attr.size(1) if e_attr is not None else 0,
+    #             'y': 0
+    #         }
+    #         self.output_dims = {
+    #             'X': self.input_dims['X'],
+    #             'E': self.input_dims['E'],
+    #             'y': 0
+    #         }
