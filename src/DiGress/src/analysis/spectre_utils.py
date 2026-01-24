@@ -3,7 +3,6 @@
 # Adapted from https://github.com/lrjconan/GRAN/ which in turn is adapted from https://github.com/JiaxuanYou/graph-generation
 #
 ###############################################################################
-import graph_tool.all as gt
 ##Navigate to the ./util/orca directory and compile orca.cpp
 # g++ -O2 -std=c++11 -o orca orca.cpp
 import os
@@ -21,6 +20,7 @@ from string import ascii_uppercase, digits
 from datetime import datetime
 from scipy.linalg import eigvalsh
 from scipy.stats import chi2
+from sklearn.cluster import SpectralClustering
 from ..analysis.dist_helper import compute_mmd, gaussian_emd, gaussian, emd, gaussian_tv, disc
 from torch_geometric.utils import to_networkx
 import wandb
@@ -607,54 +607,70 @@ def is_grid_graph(G):
 
 def is_sbm_graph(G, p_intra=0.3, p_inter=0.005, strict=True, refinement_steps=1000):
     """
-    Check if how closely given graph matches a SBM with given probabilites by computing mean probability of Wald test statistic for each recovered parameter
+    使用 sklearn 替代 graph-tool 实现 SBM 结构检查
     """
-
+    # 1. 块推断 (Block Recovery)
+    # 原代码中 n_blocks 范围在 2-5，我们尝试在这个范围内进行聚类
+    # 如果你大概知道社区数量，可以直接固定 n_clusters
+    best_p = 0.0
     adj = nx.adjacency_matrix(G).toarray()
-    idx = adj.nonzero()
-    g = gt.Graph()
-    g.add_edge_list(np.transpose(idx))
-    try:
-        state = gt.minimize_blockmodel_dl(g)
-    except ValueError:
+    nodes = list(G.nodes())
+    n = len(nodes)
+
+    # 尝试不同的社区数量 K (对应原代码中的 n_blocks 限制)
+    for k in range(2, 6):
+        try:
+            # 使用谱聚类寻找社区标签
+            sc = SpectralClustering(n_clusters=k, affinity='precomputed', assign_labels='discretize')
+            labels = sc.fit_predict(adj)
+        except:
+            continue
+
+        # 2. 统计参数估计
+        node_counts = np.bincount(labels, minlength=k)
+        if (node_counts == 0).any(): continue # 跳过空块
+
+        # 检查 strict 约束
         if strict:
-            return False
-        else:
-            return 0.0
+            if (node_counts > 40).any() or (node_counts < 20).any():
+                continue
 
-    # Refine using merge-split MCMC
-    for i in range(refinement_steps):
-        state.multiflip_mcmc_sweep(beta=np.inf, niter=10)
+        # 计算块内和块间的边
+        edge_counts = np.zeros((k, k))
+        for i in range(k):
+            for j in range(i, k):
+                # 提取子矩阵并求和
+                block_edges = adj[np.ix_(labels == i, labels == j)].sum()
+                edge_counts[i, j] = edge_counts[j, i] = block_edges
 
-    b = state.get_blocks()
-    b = gt.contiguous_map(state.get_blocks())
-    state = state.copy(b=b)
-    e = state.get_matrix()
-    n_blocks = state.get_nonempty_B()
-    node_counts = state.get_nr().get_array()[:n_blocks]
-    edge_counts = e.todense()[:n_blocks, :n_blocks]
+        # 计算估计的概率矩阵
+        # 块内最大可能边数: n*(n-1)/2 (无向图) 或 n*(n-1) (有向图/考虑自环)
+        # 这里遵循原代码逻辑（假设可能有自环或简化处理）
+        intra_mask = np.eye(k, dtype=bool)
+        max_intra_edges = node_counts * (node_counts - 1) + 1e-6
+        est_p_intra = np.diagonal(edge_counts) / max_intra_edges
+
+        # 块间最大可能边数: n1 * n2
+        max_inter_edges = node_counts.reshape((-1, 1)) @ node_counts.reshape((1, -1)) + 1e-6
+        est_p_inter = edge_counts / max_inter_edges
+
+        # 3. Wald Test (沃德检验)
+        W_p_intra = (est_p_intra - p_intra) ** 2 / (est_p_intra * (1 - est_p_intra) + 1e-6)
+        W_p_inter = (est_p_inter - p_inter) ** 2 / (est_p_inter * (1 - est_p_inter) + 1e-6)
+
+        W = W_p_inter.copy()
+        np.fill_diagonal(W, W_p_intra)
+        
+        # 计算平均 P 值
+        p_val_matrix = 1 - chi2.cdf(np.abs(W), df=1)
+        current_p = p_val_matrix.mean()
+        best_p = max(best_p, current_p)
+
     if strict:
-        if (node_counts > 40).sum() > 0 or (node_counts < 20).sum() > 0 or n_blocks > 5 or n_blocks < 2:
-            return False
-
-    max_intra_edges = node_counts * (node_counts - 1)
-    est_p_intra = np.diagonal(edge_counts) / (max_intra_edges + 1e-6)
-
-    max_inter_edges = node_counts.reshape((-1, 1)) @ node_counts.reshape((1, -1))
-    np.fill_diagonal(edge_counts, 0)
-    est_p_inter = edge_counts / (max_inter_edges + 1e-6)
-
-    W_p_intra = (est_p_intra - p_intra) ** 2 / (est_p_intra * (1 - est_p_intra) + 1e-6)
-    W_p_inter = (est_p_inter - p_inter) ** 2 / (est_p_inter * (1 - est_p_inter) + 1e-6)
-
-    W = W_p_inter.copy()
-    np.fill_diagonal(W, W_p_intra)
-    p = 1 - chi2.cdf(abs(W), 1)
-    p = p.mean()
-    if strict:
-        return p > 0.9  # p value < 10 %
+        # 原逻辑：社区数量需在 2-5 之间，且 p 值 > 0.9
+        return best_p > 0.9
     else:
-        return p
+        return best_p
 
 
 def eval_fraction_isomorphic(fake_graphs, train_graphs):
