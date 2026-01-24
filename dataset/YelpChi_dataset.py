@@ -2,7 +2,7 @@ import os
 import torch
 import random
 import torch.nn.functional as F
-from torch_geometric.data import InMemoryDataset
+from torch_geometric.data import InMemoryDataset, Dataset
 from torch_geometric.loader import ClusterData
 from src.DiGress.src.datasets.abstract_dataset import AbstractDataModule, AbstractDatasetInfos
 from src.DiGress.src import utils
@@ -116,6 +116,10 @@ class YelpChiSubgraphDataModule(AbstractDataModule):
             'test': YelpChiSubgraphDataset('test', root_path, original_data, is_hetero=cfg.dataset.keep_hetero, num_parts=num_parts)
         }
         super().__init__(cfg, datasets)
+        self.inner = self.train_dataset
+    
+    def __getitem__(self, item):
+        return self.inner[item]
 
     def node_types(self):
         
