@@ -41,8 +41,14 @@ class YelpChiSubgraphDataset(InMemoryDataset):
         cluster_data = ClusterData(homo_data, num_parts=self.num_parts, recursive=False)
         
         all_subgraphs = []
+        max_size = 0
+        min_size = 1e9
+        size_count = 0
         for i in range(self.num_parts):
             sub_homo = cluster_data[i]
+            max_size = max(max_size, sub_homo.num_nodes)
+            min_size = min(min_size, sub_homo.num_nodes)
+            size_count += sub_homo.num_nodes
             # 使用节点级标签y代替节点属性x
             if hasattr(sub_homo, 'y') and sub_homo.y is not None:
                 y_idx = sub_homo.y.long()
@@ -79,6 +85,7 @@ class YelpChiSubgraphDataset(InMemoryDataset):
             # if main_type in sub_hetero.node_types and hasattr(sub_hetero[main_type], 'y'):
             #     sub_hetero.y = sub_hetero[main_type].y[0].view(1, -1)
             all_subgraphs.append(sub_g)
+        print(f"Max subgraph size: {max_size}, Min subgraph size: {min_size}, Average subgraph size: {size_count / self.num_parts}")
 
         # 2. 划分数据集
         random.seed(42) # 保证划分可复现
