@@ -2,108 +2,139 @@ import os
 import torch
 import random
 import torch.nn.functional as F
-from torch_geometric.data import InMemoryDataset, Dataset
-from torch_geometric.loader import ClusterData
+from torch_geometric.data import InMemoryDataset, Dataset, HeteroData
+from torch_geometric.loader import ClusterData, ClusterLoader
 from src.DiGress.src.datasets.abstract_dataset import AbstractDataModule, AbstractDatasetInfos
 from src.DiGress.src import utils
 
-from src.utils.graphbuilder import extract_view_by_transform
+from src.utils.graphbuilder import (
+    extract_view_by_transform, 
+    hetero_cluster_split,
+    extract_view_by_matrix
+)
 
-class YelpChiMultiviewSubgraphDataset(InMemoryDataset):
-    def __init__(self, stage, root, original_data, metapaths, target, is_hetero = False, num_parts=100, transform=None, pre_transform=None):
+class YelpChiMultiviewDataset(InMemoryDataset):
+    def __init__(self, stage, root, hetero_dataset, metapaths, target, transform=None, pre_transform=None):
         self.stage = stage
-        self.original_data = original_data
-        self.num_parts = num_parts
-        self.is_hetero = is_hetero
         self.metapaths = metapaths
         self.target = target
-        # 映射 stage 到文件索引
-        self.file_idx = {'train': 0, 'val': 1, 'test': 2}[stage]
+        
+        # 【核心】：显式持有异构数据集对象的引用
+        self.hetero_base = hetero_dataset 
         
         super().__init__(root, transform, pre_transform)
-        self.data, self.slices = torch.load(self.processed_paths[self.file_idx])
+        idx = {'train': 0, 'val': 1, 'test': 2}[stage]
+        self.data, self.slices = torch.load(self.processed_paths[idx])
 
     @property
     def processed_file_names(self):
-        return ['train_subgraphs.pt', 'val_subgraphs.pt', 'test_subgraphs.pt']
+        return ['view_subgraphs_train.pt', 'view_subgraphs_val.pt', 'view_subgraphs_test.pt']
+
+    def process(self):
+        print(f"Extracting {len(self.metapaths)} views from hetero_dataset for {self.stage}...")
+        multiview_list = []
+
+        # 直接遍历传入的异构数据集实例
+        for sub_idx, h_sub in enumerate(self.hetero_base):
+            for v_idx, mp in enumerate(self.metapaths):
+                # 调用你的 API 提取视图
+                view_data = extract_view_by_transform(h_sub, mp, self.target)
+                
+                # --- 特征处理 ---
+                # 节点特征 x: 根据原标签 y 制作 one-hot (维度适配 DiGress)
+                if hasattr(view_data, 'y') and view_data.y is not None:
+                    view_data.x = F.one_hot(view_data.y.long(), num_classes=2).float()
+                
+                # 边特征 edge_attr: [E, 2], [0, 1] 表示有边
+                num_edges = view_data.edge_index.size(1)
+                edge_attr = torch.zeros((num_edges, 2))
+                edge_attr[:, 1] = 1.0
+                view_data.edge_attr = edge_attr
+                
+                # 图级标签 y: 标记这是第几个视图 (作为 Diffusion 的 Condition)
+                view_data.y = F.one_hot(torch.tensor([v_idx]), num_classes=len(self.metapaths)).float()
+                
+                # 保存溯源索引，方便后期联查
+                view_data.parent_hetero_idx = sub_idx
+                
+                multiview_list.append(view_data)
+
+        data, slices = self.collate(multiview_list)
+        idx = {'train': 0, 'val': 1, 'test': 2}[self.stage]
+        torch.save((data, slices), self.processed_paths[idx])
+
+class YelpChiHeteroDataset(InMemoryDataset):
+    def __init__(self, stage, root, original_data=None, num_parts=100, transform=None, pre_transform=None):
+        self.stage = stage
+        self.original_data = original_data
+        self.num_parts = num_parts
+        super().__init__(root, transform, pre_transform)
+        
+        # 加载对应的异构切片文件
+        idx = {'train': 0, 'val': 1, 'test': 2}[stage]
+        self.data, self.slices = torch.load(self.processed_paths[idx])
+
+    @property
+    def processed_file_names(self):
+        return ['hetero_subgraphs_train.pt', 'hetero_subgraphs_val.pt', 'hetero_subgraphs_test.pt']
 
     def process(self):
         if self.original_data is None:
             raise ValueError("First run requires 'original_data' to partition the graph.")
 
-        data = self.original_data
-        # 1. 转换为同构图进行切分
-        homo_data = data.to_homogeneous()
-        
-        # 确保 node_type 是 Tensor (修复之前讨论的那个 bug)
-        if hasattr(homo_data, 'node_type') and not isinstance(homo_data.node_type, torch.Tensor):
-            homo_data.node_type = torch.tensor(homo_data.node_type)
-
+        print(f"Partitioning original hetero-graph into {self.num_parts} parts...")
+        # 1. 转同构切分
+        homo_data = self.original_data.to_homogeneous()
         cluster_data = ClusterData(homo_data, num_parts=self.num_parts, recursive=False)
-        
-        all_subgraphs = []
-        max_size = 0
-        min_size = 1e9
-        size_count = 0
-        for i in range(self.num_parts):
-            sub_homo = cluster_data[i]
-            max_size = max(max_size, sub_homo.num_nodes)
-            min_size = min(min_size, sub_homo.num_nodes)
-            size_count += sub_homo.num_nodes
-            # 使用节点级标签y代替节点属性x
-            if hasattr(sub_homo, 'y') and sub_homo.y is not None:
-                y_idx = sub_homo.y.long()
-                sub_homo.x = F.one_hot(y_idx, num_classes=2).float()
-                if sub_homo.x.dim() == 1:
-                    sub_homo.x = sub_homo.x.unsqueeze(-1)
-            else:
-                raise ValueError(f"Subgraph {i} does not have 'y' labels!")
-            # 再次检查子图 Tensor 状态
-            if not isinstance(sub_homo.node_type, torch.Tensor):
-                sub_homo.node_type = torch.tensor(sub_homo.node_type)
-            # 边属性赋值
-            num_edges = sub_homo.edge_index.size(1)
-            # 创建一个 [num_edges, 2] 的浮点张量
-            # 索引 0 位留给“无边”，索引 1 位给“有边”
-            edge_attr = torch.zeros((num_edges, 2), dtype=torch.float)
-            # 将所有存在的边标记为类别 1
-            edge_attr[:, 1] = 1.0
-            # 赋值回子图对象
-            sub_homo.edge_attr = edge_attr
-            # 子图级标签赋值
-            y = torch.zeros([1, 0]).float()
-            sub_homo.y = y
-            sub_g = sub_homo
-            all_subgraphs.append(sub_g)
-        print(f"Max subgraph size: {max_size}, Min subgraph size: {min_size}, Average subgraph size: {size_count / self.num_parts}")
+        loader = ClusterLoader(cluster_data, batch_size=1, shuffle=False)
 
-        # 2. 划分数据集
-        random.seed(42) # 保证划分可复现
-        random.shuffle(all_subgraphs)
-        n = len(all_subgraphs)
+        # 2. 还原异构并存入列表
+        node_types, edge_types = self.original_data.node_types, self.original_data.edge_types
+        all_hetero_subs = []
+        for sub_homo in loader:
+            sub_hetero = sub_homo.to_heterogeneous(node_types, edge_types)
+            all_hetero_subs.append(sub_hetero)
+
+        # 3. 划分
+        random.seed(42)
+        random.shuffle(all_hetero_subs)
+        n = len(all_hetero_subs)
         train_n, val_n = int(n * 0.8), int(n * 0.1)
-
-        lists = [
-            all_subgraphs[:train_n], 
-            all_subgraphs[train_n : train_n + val_n], 
-            all_subgraphs[train_n + val_n :]
+        
+        splits = [
+            all_hetero_subs[:train_n],
+            all_hetero_subs[train_n : train_n + val_n],
+            all_hetero_subs[train_n + val_n :]
         ]
 
-        # 3. 保存
-        for i, data_list in enumerate(lists):
-            torch.save(self.collate(data_list), self.processed_paths[i])
+        # 4. 分别保存三个文件
+        for i, data_list in enumerate(splits):
+            data, slices = self.collate(data_list)
+            torch.save((data, slices), self.processed_paths[i])
 
 
-class YelpChiMultiviewSubgraphDataModule(AbstractDataModule):
-    def __init__(self, cfg, original_data=None):
-        root_path = cfg.dataset.datadir
-        num_parts = cfg.dataset.num_parts # 需在 config 中定义
-        self.is_hetero = cfg.dataset.keep_hetero
-        
+class YelpChihDataModule(AbstractDataModule):
+    def __init__(self, cfg, hetero_graph=None):
+        self.cfg = cfg
+        self.hetero_graph = hetero_graph
+        self.root = cfg.dataset.root
+        self.metapaths = cfg.dataset.metapaths
+        self.target = cfg.dataset.target
+        self.num_parts = cfg.dataset.num_parts
+        # 构造异构图数据集
+        train_hetero = YelpChiHeteroDataset('train', self.root, self.hetero_graph, self.num_parts)
+        val_hetero = YelpChiHeteroDataset('val', self.root, self.hetero_graph, self.num_parts)
+        test_hetero = YelpChiHeteroDataset('test', self.root, self.hetero_graph, self.num_parts)
+        self.hetero_datasets = {
+            'train': train_hetero,
+            'val': val_hetero,
+            'test': test_hetero
+        }
+        # 根据异构图构造同构图数据集
         datasets = {
-            'train': YelpChiMultiviewSubgraphDataset('train', root_path, original_data, is_hetero=cfg.dataset.keep_hetero, num_parts=num_parts),
-            'val': YelpChiMultiviewSubgraphDataset('val', root_path, original_data, is_hetero=cfg.dataset.keep_hetero, num_parts=num_parts),
-            'test': YelpChiMultiviewSubgraphDataset('test', root_path, original_data, is_hetero=cfg.dataset.keep_hetero, num_parts=num_parts)
+            'train': YelpChiMultiviewDataset('train', self.root, train_hetero, self.metapaths, self.target),
+            'val': YelpChiMultiviewDataset('val', self.root, val_hetero, self.metapaths, self.target),
+            'test': YelpChiMultiviewDataset('test', self.root, test_hetero, self.metapaths, self.target)
         }
         super().__init__(cfg, datasets)
         self.inner = self.train_dataset
@@ -112,23 +143,18 @@ class YelpChiMultiviewSubgraphDataModule(AbstractDataModule):
         return self.inner[item]
 
     def node_types(self):
+        example_batch = next(iter(self.train_dataloader()))
+        # 【异构情况】
+        # 此时“节点类型”通常指不同的实体（如 User, Review）
+        node_types_list = list(example_batch.x_dict.keys())
+        num_classes = len(node_types_list)
+        counts = torch.zeros(num_classes, dtype=torch.float)
         
-        if not self.is_hetero:
-            # 【同构情况】
-            return super().node_types()
-        else:
-            example_batch = next(iter(self.train_dataloader()))
-            # 【异构情况】
-            # 此时“节点类型”通常指不同的实体（如 User, Review）
-            node_types_list = list(example_batch.x_dict.keys())
-            num_classes = len(node_types_list)
-            counts = torch.zeros(num_classes, dtype=torch.float)
-            
-            for data in self.train_dataloader():
-                for i, n_type in enumerate(node_types_list):
-                    # 统计该 Batch 中每种类型的节点数量
-                    counts[i] += data[n_type].num_nodes
-                    
+        for data in self.train_dataloader():
+            for i, n_type in enumerate(node_types_list):
+                # 统计该 Batch 中每种类型的节点数量
+                counts[i] += data[n_type].num_nodes
+                
         # 2. 归一化，得到概率分布 (例如 [0.9, 0.1] 表示 90% 是正常节点)
         return counts / counts.sum()
     
@@ -162,17 +188,15 @@ class YelpChiMultiviewSubgraphDataModule(AbstractDataModule):
         d = d / d.sum()
         return d
 
-class YelpChiMultiviewSubgraphDatasetInfos(AbstractDatasetInfos):
+class YelpChiDatasetInfos(AbstractDatasetInfos):
     def __init__(self, datamodule, cfg):
-        self.is_hetero = cfg.dataset.keep_hetero
         self.datamodule = datamodule
-
         self.name = 'HeteroCustom'
         # 获取基础统计信息
         # 注意：由于是异构图，这里的 max_n_nodes 是所有类型节点总和的最大值
         self.n_nodes = datamodule.node_counts() 
         self.node_types = datamodule.node_types()
         self.edge_types = datamodule.edge_counts()
-        
+    
         # 调用父类完成 DistributionNodes 等初始化
         self.complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
