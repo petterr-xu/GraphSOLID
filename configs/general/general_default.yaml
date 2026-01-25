@@ -11,8 +11,8 @@ test_only: null         # Use absolute path
 check_val_every_n_epochs: 2
 sample_every_val: 4
 val_check_interval: null
-samples_to_generate: 16       # We advise to set it to 2 x batch_size maximum
-samples_to_save: 20
+samples_to_generate: 8       # We advise to set it to 2 x batch_size maximum
+samples_to_save: 8
 chains_to_save: 1
 log_every_steps: 50
 number_chain_steps: 50        # Number of frames in each gif
