@@ -754,6 +754,5 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         # 输出：返回最终采样出的离散图结构 (t=0)
         # -----------------------------------------------------------
         # discrete_sampled_s 包含了最终的类别索引 (非 One-Hot)
-        final_output = discrete_sampled_s.mask(node_mask, collapse=True)
-        
-        return final_output
+        # final_output = discrete_sampled_s.mask(node_mask, collapse=True)
+        return discrete_sampled_s, node_mask

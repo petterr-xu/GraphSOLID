@@ -2,6 +2,7 @@ import os
 import torch
 import random
 import torch.nn.functional as F
+from torch_geometric.transforms import RandomNodeSplit
 from torch_geometric.data import InMemoryDataset, Dataset
 from torch_geometric.loader import ClusterData, ClusterLoader
 from src.DiGress.src.datasets.abstract_dataset import AbstractDataModule, AbstractDatasetInfos
@@ -46,6 +47,7 @@ class YelpChiSubgraphDataset(InMemoryDataset):
         max_size = 0
         min_size = 1e9
         size_count = 0
+        tranform = RandomNodeSplit(num_val=0.2, num_test=0.4)
         for sub_homo in loader:
             max_size = max(max_size, sub_homo.num_nodes)
             min_size = min(min_size, sub_homo.num_nodes)
@@ -73,6 +75,7 @@ class YelpChiSubgraphDataset(InMemoryDataset):
             # 子图级标签赋值
             y = torch.zeros([1, 0]).float()
             sub_homo.y = y
+            sub_homo = tranform(sub_homo)
             # 还原为异构图
             if self.is_hetero:
                 sub_g = sub_homo.to_heterogeneous(
