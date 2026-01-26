@@ -4,3 +4,5 @@ remove_h: null
 filter: False
 num_parts: 200
 keep_hetero: False
+target: 'review'
+metapaths: [["review", "rur", "review"],["review", "rsr", "review"],["review", "rtr", "review"]]

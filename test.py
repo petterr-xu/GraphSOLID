@@ -80,19 +80,21 @@ def main(cfg: DictConfig):
     dataset_config = cfg["dataset"]
     hetero_data = load_imb_data(dataset_config["name"])
     if dataset_config["name"] in ['YelpChi', 'Amazon-Products']:
-        from src.dataset.YelpChi_dataset import YelpChiSubgraphDataModule, YelpChiSubgraphDataset, YelpChiSubgraphDatasetInfos
+        from src.dataset.YelpChi_multiview_dataset import YelpChihDataModule, YelpChiDatasetInfos
         from src.DiGress.src.metrics.abstract_metrics import TrainAbstractMetricsDiscrete
         from src.DiGress.src.analysis.visualization import NonMolecularVisualization
         from src.DiGress.src.analysis.spectre_utils import YelpChiSamplingMetrics
         from src.DiGress.src.diffusion.extra_features import ExtraFeatures, DummyExtraFeatures
         from src.DiGress.src.metrics.abstract_metrics import TrainAbstractMetricsDiscrete, TrainAbstractMetrics
-        datamodule = YelpChiSubgraphDataModule(cfg, hetero_data.g)
+        # datamodule = YelpChiSubgraphDataModule(cfg, hetero_data.g)
+        datamodule = YelpChihDataModule(cfg, hetero_data.g)
         if(dataset_config["name"]=='YelpChi'):
             sampling_metrics = YelpChiSamplingMetrics(datamodule,cfg)
         else:
             sampling_metrics = None # todo
 
-        dataset_infos = YelpChiSubgraphDatasetInfos(datamodule, cfg)
+        # dataset_infos = YelpChiSubgraphDatasetInfos(datamodule, cfg)
+        dataset_infos = YelpChiDatasetInfos(datamodule, cfg)
         train_metrics = TrainAbstractMetricsDiscrete()
         visualization_tools = NonMolecularVisualization()
 
