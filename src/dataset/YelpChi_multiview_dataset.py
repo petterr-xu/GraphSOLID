@@ -1,6 +1,7 @@
 import os
 import torch
 import random
+import os.path as osp
 import torch.nn.functional as F
 from torch_geometric.data import InMemoryDataset, Dataset, HeteroData
 from torch_geometric.loader import ClusterData, ClusterLoader
@@ -13,111 +14,116 @@ from src.utils.graphbuilder import (
     extract_view_by_matrix
 )
 
-class YelpChiMultiviewDataset(InMemoryDataset):
+class YelpChiMultiviewDataset(Dataset):
     def __init__(self, stage, root, hetero_dataset, metapaths, target, transform=None, pre_transform=None):
         self.stage = stage
         self.metapaths = metapaths
         self.target = target
-        
-        # 【核心】：显式持有异构数据集对象的引用
-        self.hetero_base = hetero_dataset 
+        self.hetero_base = hetero_dataset # 此时 hetero_base 也是一个 Dataset 对象
         
         super().__init__(root, transform, pre_transform)
-        idx = {'train': 0, 'val': 1, 'test': 2}[stage]
-        self.data, self.slices = torch.load(self.processed_paths[idx])
 
     @property
     def processed_file_names(self):
-        return ['view_subgraphs_train.pt', 'view_subgraphs_val.pt', 'view_subgraphs_test.pt']
+        # 视图总数 = 基础异构图数 * 元路径数
+        total_views = len(self.hetero_base) * len(self.metapaths)
+        return [f'view_{self.stage}_{i}.pt' for i in range(total_views)]
+
+    def len(self):
+        return len(self.hetero_base) * len(self.metapaths)
+
+    def get(self, idx):
+        path = osp.join(self.processed_dir, f'view_{self.stage}_{idx}.pt')
+        return torch.load(path)
 
     def process(self):
-        print(f"Extracting {len(self.metapaths)} views from hetero_dataset for {self.stage}...")
-        multiview_list = []
-
-        # 直接遍历传入的异构数据集实例
-        for sub_idx, h_sub in enumerate(self.hetero_base):
+        print(f"Generating multiview subgraphs for {self.stage}...")
+        global_idx = 0
+        
+        # 遍历基础异构数据集（此时 hetero_base[sub_idx] 会触发磁盘读取）
+        for sub_idx in range(len(self.hetero_base)):
+            h_sub = self.hetero_base[sub_idx]
+            
             for v_idx, mp in enumerate(self.metapaths):
-                # 调用你的 API 提取视图
                 view_data = extract_view_by_transform(h_sub, mp, self.target)
                 
-                # --- 特征处理 ---
-                # 节点特征 x: 根据原标签 y 制作 one-hot (维度适配 DiGress)
+                # 特征处理（保持你原有的逻辑）
                 if hasattr(view_data, 'y') and view_data.y is not None:
-                    view_data.x = F.one_hot(view_data.y.long(), num_classes=2).float()
+                    view_data.x = torch.nn.functional.one_hot(view_data.y.long(), num_classes=2).float()
                 
-                # 边特征 edge_attr: [E, 2], [0, 1] 表示有边
                 num_edges = view_data.edge_index.size(1)
                 edge_attr = torch.zeros((num_edges, 2))
                 edge_attr[:, 1] = 1.0
                 view_data.edge_attr = edge_attr
                 
-                # 图级标签 y: 标记这是第几个视图 (作为 Diffusion 的 Condition)
-                view_data.y = F.one_hot(torch.tensor([v_idx]), num_classes=len(self.metapaths)).float()
-                
-                # 保存溯源索引，方便后期联查
+                view_data.y = torch.nn.functional.one_hot(torch.tensor([v_idx]), num_classes=len(self.metapaths)).float()
                 view_data.parent_hetero_idx = sub_idx
                 
-                multiview_list.append(view_data)
+                # 【核心逻辑】：处理一个存一个，避免内存溢出
+                save_path = osp.join(self.processed_dir, f'view_{self.stage}_{global_idx}.pt')
+                torch.save(view_data, save_path)
+                global_idx += 1
 
-        data, slices = self.collate(multiview_list)
-        idx = {'train': 0, 'val': 1, 'test': 2}[self.stage]
-        torch.save((data, slices), self.processed_paths[idx])
-
-class YelpChiHeteroDataset(InMemoryDataset):
+class YelpChiHeteroDataset(Dataset):
     def __init__(self, stage, root, original_data=None, num_parts=100, transform=None, pre_transform=None):
         self.stage = stage
         self.original_data = original_data
         self.num_parts = num_parts
-        super().__init__(root, transform, pre_transform)
+        # 计算各阶段应有的数量（用于 len()）
+        self.train_n = int(num_parts * 0.8)
+        self.val_n = int(num_parts * 0.1)
+        self.test_n = num_parts - self.train_n - self.val_n
         
-        # 加载对应的异构切片文件
-        idx = {'train': 0, 'val': 1, 'test': 2}[stage]
-        self.data, self.slices = torch.load(self.processed_paths[idx])
+        super().__init__(root, transform, pre_transform)
 
     @property
     def processed_file_names(self):
-        return ['hetero_subgraphs_train.pt', 'hetero_subgraphs_val.pt', 'hetero_subgraphs_test.pt']
+        # 只要存在这些“哨兵文件”，PyG 就不会重新执行 process
+        return [f'hetero_{self.stage}_{i}.pt' for i in range(self.len())]
+
+    def len(self):
+        return {'train': self.train_n, 'val': self.val_n, 'test': self.test_n}[self.stage]
+
+    def get(self, idx):
+        # 懒加载：只有在访问 dataset[idx] 时才读磁盘
+        path = osp.join(self.processed_dir, f'hetero_{self.stage}_{idx}.pt')
+        return torch.load(path)
 
     def process(self):
         if self.original_data is None:
-            raise ValueError("First run requires 'original_data' to partition the graph.")
+            # 如果没有传原图且没找到处理好的文件，报错
+            raise ValueError("Processed files not found. Please provide 'original_data' to partition.")
 
         print(f"Partitioning original hetero-graph into {self.num_parts} parts...")
-        # 1. 转同构切分
         homo_data = self.original_data.to_homogeneous()
         cluster_data = ClusterData(homo_data, num_parts=self.num_parts, recursive=False)
         loader = ClusterLoader(cluster_data, batch_size=1, shuffle=False)
 
-        # 2. 还原异构并存入列表
         node_types, edge_types = self.original_data.node_types, self.original_data.edge_types
         all_hetero_subs = []
         for sub_homo in loader:
-            sub_hetero = sub_homo.to_heterogeneous(node_types, edge_types)
+            # 使用我们之前讨论过的更稳健的还原方式
+            sub_hetero = sub_homo.to_heterogeneous(node_type_names=node_types, edge_type_names=edge_types)
             all_hetero_subs.append(sub_hetero)
 
-        # 3. 划分
         random.seed(42)
         random.shuffle(all_hetero_subs)
-        n = len(all_hetero_subs)
-        train_n, val_n = int(n * 0.8), int(n * 0.1)
         
-        splits = [
-            all_hetero_subs[:train_n],
-            all_hetero_subs[train_n : train_n + val_n],
-            all_hetero_subs[train_n + val_n :]
-        ]
+        # 划分列表
+        train_list = all_hetero_subs[:self.train_n]
+        val_list = all_hetero_subs[self.train_n : self.train_n + self.val_n]
+        test_list = all_hetero_subs[self.train_n + self.val_n :]
 
-        # 4. 分别保存三个文件
-        for i, data_list in enumerate(splits):
-            data, slices = self.collate(data_list)
-            torch.save((data, slices), self.processed_paths[i])
-
+        # 【核心逻辑】：循环单独保存每一个子图文件
+        for stage_name, data_list in zip(['train', 'val', 'test'], [train_list, val_list, test_list]):
+            for i, data in enumerate(data_list):
+                torch.save(data, osp.join(self.processed_dir, f'hetero_{stage_name}_{i}.pt'))
 
 class YelpChihDataModule(AbstractDataModule):
     def __init__(self, cfg, hetero_graph=None):
         self.cfg = cfg
         self.hetero_graph = hetero_graph
-        self.root = cfg.dataset.root
+        self.root = cfg.dataset.datadir
         self.metapaths = cfg.dataset.metapaths
         self.target = cfg.dataset.target
         self.num_parts = cfg.dataset.num_parts
@@ -141,22 +147,9 @@ class YelpChihDataModule(AbstractDataModule):
     
     def __getitem__(self, item):
         return self.inner[item]
-
+    
     def node_types(self):
-        example_batch = next(iter(self.train_dataloader()))
-        # 【异构情况】
-        # 此时“节点类型”通常指不同的实体（如 User, Review）
-        node_types_list = list(example_batch.x_dict.keys())
-        num_classes = len(node_types_list)
-        counts = torch.zeros(num_classes, dtype=torch.float)
-        
-        for data in self.train_dataloader():
-            for i, n_type in enumerate(node_types_list):
-                # 统计该 Batch 中每种类型的节点数量
-                counts[i] += data[n_type].num_nodes
-                
-        # 2. 归一化，得到概率分布 (例如 [0.9, 0.1] 表示 90% 是正常节点)
-        return counts / counts.sum()
+            return super().node_types()
     
     def edge_counts(self):
         # 没有 edge_attr，默认边只有两类：0 (无边), 1 (有边)
@@ -188,6 +181,7 @@ class YelpChihDataModule(AbstractDataModule):
         d = d / d.sum()
         return d
 
+
 class YelpChiDatasetInfos(AbstractDatasetInfos):
     def __init__(self, datamodule, cfg):
         self.datamodule = datamodule
@@ -200,3 +194,26 @@ class YelpChiDatasetInfos(AbstractDatasetInfos):
     
         # 调用父类完成 DistributionNodes 等初始化
         self.complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
+
+    # def compute_input_output_dims(self, datamodule, extra_features, domain_features):
+    #     example_batch = next(iter(datamodule.train_dataloader()))
+    #     ex_dense, node_mask = utils.to_dense(example_batch.x, example_batch.edge_index, example_batch.edge_attr,
+    #                                          example_batch.batch)
+    #     example_data = {'X_t': ex_dense.X, 'E_t': ex_dense.E, 'y_t': example_batch['y'], 'node_mask': node_mask}
+
+    #     self.input_dims = {'X': example_batch['x'].size(1),
+    #                        'E': example_batch['edge_attr'].size(1),
+    #                        'y': example_batch['y'].size(1) + 1}      # + 1 due to time conditioning
+    #     ex_extra_feat = extra_features(example_data)
+    #     self.input_dims['X'] += ex_extra_feat.X.size(-1)
+    #     self.input_dims['E'] += ex_extra_feat.E.size(-1)
+    #     self.input_dims['y'] += ex_extra_feat.y.size(-1)
+
+    #     ex_extra_molecular_feat = domain_features(example_data)
+    #     self.input_dims['X'] += ex_extra_molecular_feat.X.size(-1)
+    #     self.input_dims['E'] += ex_extra_molecular_feat.E.size(-1)
+    #     self.input_dims['y'] += ex_extra_molecular_feat.y.size(-1)
+
+    #     self.output_dims = {'X': example_batch['x'].size(1),
+    #                         'E': example_batch['edge_attr'].size(1),
+    #                         'y': example_batch['y'].size(1)}
