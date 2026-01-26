@@ -371,7 +371,7 @@ def sample_discrete_feature_noise(limit_dist, node_mask):
     y_limit = limit_dist.y[None, :].expand(bs, -1)
     U_X = x_limit.flatten(end_dim=-2).multinomial(1).reshape(bs, n_max)
     U_E = e_limit.flatten(end_dim=-2).multinomial(1).reshape(bs, n_max, n_max)
-    U_y = torch.empty((bs, 0))
+    U_y = y_limit.multinomial(1).reshape(bs)
 
     long_mask = node_mask.long()
     U_X = U_X.type_as(long_mask)
@@ -380,7 +380,8 @@ def sample_discrete_feature_noise(limit_dist, node_mask):
 
     U_X = F.one_hot(U_X, num_classes=x_limit.shape[-1]).float()
     U_E = F.one_hot(U_E, num_classes=e_limit.shape[-1]).float()
-
+    U_y = F.one_hot(U_y, num_classes=y_limit.shape[-1]).float()
+    
     # Get upper triangular part of edge noise, without main diagonal
     upper_triangular_mask = torch.zeros_like(U_E)
     indices = torch.triu_indices(row=U_E.size(1), col=U_E.size(2), offset=1)

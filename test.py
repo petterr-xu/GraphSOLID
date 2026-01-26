@@ -96,7 +96,7 @@ def main(cfg: DictConfig):
         # dataset_infos = YelpChiSubgraphDatasetInfos(datamodule, cfg)
         dataset_infos = YelpChiDatasetInfos(datamodule, cfg)
         train_metrics = TrainAbstractMetricsDiscrete()
-        visualization_tools = NonMolecularVisualization()
+        visualization_tools = None # NonMolecularVisualization()
 
         '''
         todo: extra features for hetero graph
