@@ -7,7 +7,79 @@ import torch_geometric.transforms as T
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import ClusterData, ClusterLoader
 from torch_geometric.utils import to_dense_batch
+from scipy.sparse.csgraph import connected_components
+from torch_geometric.utils import remove_self_loops, to_undirected, to_scipy_sparse_matrix
 
+def largest_connected_components(adj, n_components=1):
+    """Select the largest connected components in the graph.
+    Parameters
+    ----------
+    adj : gust.SparseGraph
+        Input graph.
+    n_components : int, default 1
+        Number of largest connected components to keep.
+    Returns
+    -------
+    sparse_graph : gust.SparseGraph
+        Subgraph of the input graph where only the nodes in largest n_components are kept.
+    """
+    _, component_indices = connected_components(adj)
+    component_sizes = np.bincount(component_indices)
+    components_to_keep = np.argsort(component_sizes)[::-1][:n_components]  # reverse order to sort descending
+    nodes_to_keep = [
+        idx for (idx, component) in enumerate(component_indices) if component in components_to_keep
+
+
+    ]
+    print("Selecting {0} largest connected components".format(n_components))
+    return nodes_to_keep
+
+def pyg2matrix(data: Data):
+    """
+    将PyG数据集转换为nettack/metattack兼容的格式（scipy稀疏矩阵/NumPy数组）
+    :return: _A_obs, _X_obs, _z_obs, _Z_obs, _N, _K, data_mask （mask包含train/val/test索引）
+    """
+    # 2. 处理边：去自环、转无向 → scipy CSR邻接矩阵
+    edge_index, _ = remove_self_loops(data.edge_index)
+    edge_index = to_undirected(edge_index)
+    _A_obs = to_scipy_sparse_matrix(edge_index, num_nodes=data.num_nodes).tocsr()
+
+    # 3. 对齐原代码的邻接矩阵后处理
+    _A_obs = _A_obs + _A_obs.T
+    _A_obs[_A_obs > 1] = 1
+    lcc = largest_connected_components(_A_obs)  # 保留最大连通子图
+    _A_obs = _A_obs[lcc][:, lcc]
+    _A_obs.setdiag(0)
+    _A_obs = _A_obs.astype("float32")
+    _A_obs.eliminate_zeros()
+
+    # 4. 验证邻接矩阵（原代码校验逻辑）
+    assert np.abs(_A_obs - _A_obs.T).sum() == 0, "Input graph is not symmetric"
+    assert _A_obs.max() == 1 and len(np.unique(_A_obs[_A_obs.nonzero()].A1)) == 1, "Graph must be unweighted"
+    assert _A_obs.sum(0).A1.min() > 0, "Graph contains singleton nodes"
+
+    # 5. 转换节点特征：PyTorch张量 → NumPy数组
+    _X_obs = data.x.cpu().numpy().astype("float32")
+    _X_obs = _X_obs[lcc]  # 映射到最大连通子图
+
+    # 6. 转换标签：PyTorch张量 → NumPy数组（one-hot）
+    _z_obs = data.y.cpu().numpy().squeeze()
+    _z_obs = _z_obs[lcc]  # 映射到最大连通子图
+    _K = len(np.unique(_z_obs))  # 类别数
+    _Z_obs = np.eye(_K)[_z_obs]
+
+    # 7. 处理PyG自带的mask → 映射到最大连通子图后的索引
+    _N = _A_obs.shape[0]  # 最大连通子图节点数
+    original_node_idx = np.arange(data.num_nodes)[lcc]  # 最大连通子图的原始节点索引
+
+    # 构建mask字典：存储train/val/test的索引（基于最大连通子图）
+    data_mask = {
+        "train": np.where(data.train_mask.cpu().numpy()[original_node_idx])[0],
+        "val": np.where(data.val_mask.cpu().numpy()[original_node_idx])[0],
+        "test": np.where(data.test_mask.cpu().numpy()[original_node_idx])[0]
+    }
+
+    return _A_obs, _X_obs, _z_obs, _Z_obs, _N, _K, data_mask
 
 def make_longtailed_data_remove(edge_index, label, n_data, n_cls, ratio, train_mask, max_n=500):
     # Sort from major to minor

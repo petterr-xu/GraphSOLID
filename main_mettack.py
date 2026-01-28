@@ -57,7 +57,7 @@ ATTACK_VARIANT = "Meta-Self"  # 攻击变体（可选：Meta-Train/Meta-Self/A-M
 ENFORCE_LL_CONSTRAINT = False
 
 # ===================== 3. 核心函数封装 =====================
-def convert_pyg_data(data):
+def convert_pyg_data(data: Data):
     """
     将PyG数据集转换为原代码兼容的格式（scipy稀疏矩阵/NumPy数组）
     :return: _A_obs, _X_obs, _z_obs, _Z_obs, _N, _K, data_mask （mask包含train/val/test索引）
@@ -288,7 +288,7 @@ def main():
     else:
         raise NotImplementedError("Not implemented for dataset {}".format(args.dataset))
     # 步骤1：加载并转换PyG数据（替换dataset_name为你的数据集）
-    _A_obs, _X_obs, _z_obs, _Z_obs, _N, _K, data_mask = convert_pyg_data(data)
+    _A_obs, _X_obs, _z_obs, _Z_obs, _N, _K, data_mask = graphbuilder.pyg2matrix(data)
 
     # 步骤2：基于PyG mask划分数据集
     split_train, split_val, split_unlabeled = split_dataset_by_pyg_mask(data_mask)
