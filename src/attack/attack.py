@@ -2,6 +2,7 @@ import numpy as np
 from tqdm import tqdm
 import tensorflow as tf
 import scipy.sparse as sp
+from torch_geometric.data import Data, HeteroData
 
 from src.utils import graphbuilder
 from ..dataset.abstract_dataset import AbstractDataModule
@@ -30,53 +31,62 @@ class Metattacker():
         loader = self.dataset_module.test_dataloader()
         all_accuracies_clean = []
         all_accuracies_atk = []
-        for data in loader:
+        pbar = tqdm(loader, desc="[Overall Progress]", unit="subgraph")
+    
+        for data in pbar:
+            if isinstance(data, HeteroData):
+                data = data.to_homogeneous()
             _A_obs, _X_obs, _z_obs, _Z_obs, _N, _K, data_mask = graphbuilder.pyg2matrix(data)
             split_train, split_val, split_unlabeled = graphbuilder.split_dataset_by_pyg_mask(data_mask)
+
+            pbar.set_description(f"Attacking subgraph (Nodes: {_N})")
             modified_adjacency = self._run_meta_attack_on_single_graph(
                 _A_obs, _X_obs, _Z_obs, _N, _K, split_train, split_unlabeled, attack_variant="A-Train"
             )
+            pbar.set_description(f"Evaluating accuracy")
             accuracies_clean, accuracies_atk = self._evaluate_accuracy_on_single_graph(
                 _A_obs, modified_adjacency, _X_obs, _Z_obs, _z_obs, split_train, split_unlabeled
             )
+
             all_accuracies_clean.extend(accuracies_clean)
             all_accuracies_atk.extend(accuracies_atk)
-        return all_accuracies_clean, all_accuracies_atk
-        
 
+            curr_clean_avg = np.mean(accuracies_clean)
+            curr_atk_avg = np.mean(accuracies_atk)
+            drop = curr_clean_avg - curr_atk_avg
+            pbar.set_postfix({
+                'Clean_Acc': f'{curr_clean_avg:.4f}',
+                'Atk_Acc': f'{curr_atk_avg:.4f}',
+                'Drop': f'{drop:.4f}'
+            })
+
+        return all_accuracies_clean, all_accuracies_atk
+    
     def _evaluate_accuracy_on_single_graph(self, _A_obs, modified_adjacency, _X_obs, _Z_obs, _z_obs, split_train, split_unlabeled):
-        """
-        评估攻击前后的模型准确率
-        :param _A_obs: 原始邻接矩阵
-        :param modified_adjacency: 扰动后的邻接矩阵
-        :param _X_obs: 节点特征
-        :param _Z_obs: one-hot标签
-        :param _z_obs: 类别索引标签
-        :param split_train: 训练集索引
-        :param split_unlabeled: 无标签集（val+test）索引
-        :return: accuracies_clean, accuracies_atk
-        """
         hidden_sizes = [16]
-        # 1. 攻击前准确率
+        
         gcn_before_attack = mtk.GCNSparse(sp.csr_matrix(_A_obs), _X_obs, _Z_obs, hidden_sizes, gpu_id=self.GPU_ID)
         gcn_before_attack.build(with_relu=True)
         accuracies_clean = []
-        for _it in tqdm(range(self.RE_TRAININGS), desc="Evaluating clean accuracy"):
+        
+        for _it in tqdm(range(self.RE_TRAININGS), desc="  └─ Clean Eval", leave=False):
             gcn_before_attack.train(split_train, initialize=True, display=False)
-            accuracy_clean = (gcn_before_attack.logits.eval(session=gcn_before_attack.session).argmax(1) == _z_obs)[split_unlabeled].mean()
+            logits = gcn_before_attack.logits.eval(session=gcn_before_attack.session)
+            accuracy_clean = (logits.argmax(1) == _z_obs)[split_unlabeled].mean()
             accuracies_clean.append(accuracy_clean)
 
-        # 2. 攻击后准确率
         gcn_after_attack = mtk.GCNSparse(sp.csr_matrix(modified_adjacency), _X_obs, _Z_obs, hidden_sizes, gpu_id=self.GPU_ID)
         gcn_after_attack.build(with_relu=True)
         accuracies_atk = []
-        for _it in tqdm(range(self.RE_TRAININGS), desc="Evaluating attacked accuracy"):
+        
+        for _it in tqdm(range(self.RE_TRAININGS), desc="  └─ Attack Eval", leave=False):
             gcn_after_attack.train(split_train, initialize=True, display=False)
-            accuracy_atk = (gcn_after_attack.logits.eval(session=gcn_after_attack.session).argmax(1) == _z_obs)[split_unlabeled].mean()
+            logits = gcn_after_attack.logits.eval(session=gcn_after_attack.session)
+            accuracy_atk = (logits.argmax(1) == _z_obs)[split_unlabeled].mean()
             accuracies_atk.append(accuracy_atk)
 
         return accuracies_clean, accuracies_atk
-
+    
     def _run_meta_attack_on_single_graph(self, _A_obs, _X_obs, _Z_obs, _N, _K, split_train, split_unlabeled, attack_variant):
         """
         执行MetaAttack攻击逻辑
