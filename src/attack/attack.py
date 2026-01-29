@@ -28,7 +28,7 @@ class Metattacker():
         """
         向测试集投毒，并测试投毒后的测试结果
         """
-        loader = self.dataset_module.test_dataloader()
+        loader = self.dataset_module.hetero_datasets['test']
         all_accuracies_clean = []
         all_accuracies_atk = []
         pbar = tqdm(loader, desc="[Overall Progress]", unit="subgraph")
