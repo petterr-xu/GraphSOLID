@@ -10,6 +10,18 @@ from torch_geometric.utils import to_dense_batch
 from scipy.sparse.csgraph import connected_components
 from torch_geometric.utils import remove_self_loops, to_undirected, to_scipy_sparse_matrix
 
+def split_dataset_by_pyg_mask(data_mask):
+    """
+    基于PyG自带的mask划分数据集（对齐原代码的split_train/split_val/split_unlabeled）
+    :param data_mask: 包含train/val/test索引的字典
+    :return: split_train, split_val, split_unlabeled
+    """
+    split_train = data_mask["train"]
+    split_val = data_mask["val"]
+    split_unlabeled = data_mask["test"]  # 原代码中unlabeled包含val+test，此处对齐
+    split_unlabeled = np.union1d(split_val, split_unlabeled)
+    return split_train, split_val, split_unlabeled
+
 def largest_connected_components(adj, n_components=1):
     """Select the largest connected components in the graph.
     Parameters

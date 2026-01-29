@@ -5,7 +5,7 @@ import os.path as osp
 import torch.nn.functional as F
 from torch_geometric.data import InMemoryDataset, Dataset, HeteroData
 from torch_geometric.loader import ClusterData, ClusterLoader
-from src.DiGress.src.datasets.abstract_dataset import AbstractDataModule, AbstractDatasetInfos
+from .abstract_dataset import AbstractDataModule, AbstractDatasetInfos
 from src.DiGress.src import utils
 
 from src.utils.graphbuilder import (
