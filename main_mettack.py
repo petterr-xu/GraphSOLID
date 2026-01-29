@@ -1,5 +1,7 @@
+import os
 import torch
 import hydra
+import warnings
 import numpy as np
 import seaborn as sns
 import os.path as osp
@@ -18,7 +20,10 @@ from src.utils.hetero_dataset_util import GraphDataLoader
 from src.gnn_meta_attack.metattack import meta_gradient_attack as mtk
 from src.DiGress.src import utils as digress_utils
 from src.DiGress.src.diffusion_model_discrete import DiscreteDenoisingDiffusion 
-
+# 1. 屏蔽 TensorFlow C++ 层面的日志 (3 = 仅致命错误)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+# 2. 屏蔽 Python 库级别的所有警告 (如 Scipy, Numpy 的弃用警告)
+warnings.filterwarnings("ignore")
 # 禁用TF Eager Execution（原代码要求）
 tf.compat.v1.disable_eager_execution()
 try:

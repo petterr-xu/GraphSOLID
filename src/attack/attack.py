@@ -11,6 +11,12 @@ from src.gnn_meta_attack.metattack import meta_gradient_attack as mtk, utils
 # class random_attacker():
 #     pass
 
+def quiet_tqdm(*args, **kwargs):
+    kwargs['leave'] = False  # 让它跑完就消失，不占行
+    # kwargs['disable'] = True # 如果想完全看不见，取消注释这一行
+    return tqdm(*args, **kwargs)
+mtk.tqdm = quiet_tqdm
+
 class Metattacker():
     def __init__(self, dataset_module:AbstractDataModule, share_perturbations, classifier, re_trainings=5, device=0, train_iters = 200):
         super().__init__()
