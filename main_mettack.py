@@ -97,21 +97,22 @@ def main(cfg: DictConfig):
     dataset_config = cfg["dataset"]
     hetero_data = load_imb_data(dataset_config["name"])
     if dataset_config["name"] in ['YelpChi', 'Amazon-Products']:
-        from src.dataset.YelpChi_subgraph_dataset import YelpChiSubgraphDataModule, YelpChiSubgraphDataset, YelpChiSubgraphDatasetInfos
+        from src.dataset.YelpChi_multiview_dataset import YelpChihDataModule, YelpChiDatasetInfos
         from src.DiGress.src.metrics.abstract_metrics import TrainAbstractMetricsDiscrete
         from src.DiGress.src.analysis.visualization import NonMolecularVisualization
         from src.DiGress.src.analysis.spectre_utils import YelpChiSamplingMetrics
         from src.DiGress.src.diffusion.extra_features import ExtraFeatures, DummyExtraFeatures
         from src.DiGress.src.metrics.abstract_metrics import TrainAbstractMetricsDiscrete, TrainAbstractMetrics
-        datamodule = YelpChiSubgraphDataModule(cfg, hetero_data.g)
+        datamodule = YelpChihDataModule(cfg, hetero_data.g)
         if(dataset_config["name"]=='YelpChi'):
             sampling_metrics = YelpChiSamplingMetrics(datamodule,cfg)
         else:
             sampling_metrics = None # todo
 
-        dataset_infos = YelpChiSubgraphDatasetInfos(datamodule, cfg)
+        # dataset_infos = YelpChiSubgraphDatasetInfos(datamodule, cfg)
+        dataset_infos = YelpChiDatasetInfos(datamodule, cfg)
         train_metrics = TrainAbstractMetricsDiscrete()
-        visualization_tools = NonMolecularVisualization()
+        visualization_tools = None # NonMolecularVisualization()
 
         '''
         todo: extra features for hetero graph
@@ -132,12 +133,16 @@ def main(cfg: DictConfig):
         raise NotImplementedError("Unknown dataset {}".format(cfg["dataset"]))
 
     digress_utils.create_folders(cfg)
-    path = '/root/autodl-tmp/outputs/2026-01-25/12-38-21-graph-tf-model/checkpoints/graph-tf-model/last-v1.ckpt'
+    path = '/root/autodl-tmp/outputs/2026-01-26/16-51-37-graph-tf-model/checkpoints/graph-tf-model/last-v1.ckpt'
     model = DiscreteDenoisingDiffusion.load_from_checkpoint(path, **model_kwargs)
     model = model.to('cuda:0')
     
-    
-    metattacker = Metattacker(datamodule,share_perturbations=0.05,classifier=None,re_trainings=5,device=cfg.general.device,train_iters = 200)
+    gpu = cfg.general.gpus
+    if gpu == 0:
+        gpuid = None
+    else:
+        gpuid = gpu - 1
+    metattacker = Metattacker(datamodule,share_perturbations=0.05,classifier=None,re_trainings=5,device=gpuid,train_iters = 200)
     accuracies_clean, accuracies_atk = metattacker.poison()
     # 打印关键结果
     print(f"Clean Accuracy (mean±std): {np.mean(accuracies_clean):.4f} ± {np.std(accuracies_clean):.4f}")
