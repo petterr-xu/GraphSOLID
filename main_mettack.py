@@ -32,12 +32,9 @@ except ImportError:
     tqdm = lambda x: x
 
 # ===================== 2. 全局配置 =====================
-GPU_ID = None
 SEED = 15
-SHARE_PERTURBATIONS = 0.05  # 扰动边的比例
-TRAIN_ITERS = 100
+SHARE_PERTURBATIONS = 0.5  # 扰动边的比例
 DTYPE = tf.float32  # 内存不足可换tf.float16
-RE_TRAININGS = 20  # 攻击后重复训练验证次数
 ATTACK_VARIANT = "Meta-Self"  # 攻击变体（可选：Meta-Train/Meta-Self/A-Meta-Train等）
 ENFORCE_LL_CONSTRAINT = False
 
@@ -147,7 +144,7 @@ def main(cfg: DictConfig):
         gpuid = None
     else:
         gpuid = gpu - 1
-    metattacker = Metattacker(datamodule,share_perturbations=0.05,classifier=None,re_trainings=5,device=gpuid,train_iters = 200)
+    metattacker = Metattacker(datamodule,share_perturbations=SHARE_PERTURBATIONS,classifier=None,re_trainings=5,device=gpuid,train_iters = 200)
     accuracies_clean, accuracies_atk = metattacker.poison()
     # 打印关键结果
     print(f"Clean Accuracy (mean±std): {np.mean(accuracies_clean):.4f} ± {np.std(accuracies_clean):.4f}")

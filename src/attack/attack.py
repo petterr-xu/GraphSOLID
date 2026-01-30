@@ -18,15 +18,16 @@ def quiet_tqdm(*args, **kwargs):
 mtk.tqdm = quiet_tqdm
 
 class Metattacker():
-    def __init__(self, dataset_module:AbstractDataModule, share_perturbations, classifier, re_trainings=5, device=0, train_iters = 200):
+    def __init__(self, dataset_module:AbstractDataModule, share_perturbations, classifier, attack_varient='Meta-Self', re_trainings=5, device=0, train_iters = 200):
         super().__init__()
         self.dataset_module = dataset_module
         self.GPU_ID = device
         self.share_perturbations = share_perturbations
         self.train_iters = train_iters
-        self.RE_TRAININGS = re_trainings
-        self.DTYPE = tf.float32
+        self.re_trainings = re_trainings
+        self.dtype = tf.float32
         self.ENFORCE_LL_CONSTRAINT = False
+        self.attack_variant = attack_varient
 
         self.classifier = classifier
 
@@ -47,7 +48,7 @@ class Metattacker():
 
             pbar.set_description(f"Attacking subgraph (Nodes: {_N})")
             modified_adjacency = self._run_meta_attack_on_single_graph(
-                _A_obs, _X_obs, _Z_obs, _N, _K, split_train, split_unlabeled, attack_variant="A-Train"
+                _A_obs, _X_obs, _Z_obs, _N, _K, split_train, split_unlabeled, attack_variant=self.attack_variant
             )
             pbar.set_description(f"Evaluating accuracy")
             accuracies_clean, accuracies_atk = self._evaluate_accuracy_on_single_graph(
@@ -75,7 +76,7 @@ class Metattacker():
         gcn_before_attack.build(with_relu=True)
         accuracies_clean = []
         
-        for _it in tqdm(range(self.RE_TRAININGS), desc="  └─ Clean Eval", leave=False):
+        for _it in tqdm(range(self.re_trainings), desc="  └─ Clean Eval", leave=False):
             gcn_before_attack.train(split_train, initialize=True, display=False)
             logits = gcn_before_attack.logits.eval(session=gcn_before_attack.session)
             accuracy_clean = (logits.argmax(1) == _z_obs)[split_unlabeled].mean()
@@ -85,7 +86,7 @@ class Metattacker():
         gcn_after_attack.build(with_relu=True)
         accuracies_atk = []
         
-        for _it in tqdm(range(self.RE_TRAININGS), desc="  └─ Attack Eval", leave=False):
+        for _it in tqdm(range(self.re_trainings), desc="  └─ Attack Eval", leave=False):
             gcn_after_attack.train(split_train, initialize=True, display=False)
             logits = gcn_after_attack.logits.eval(session=gcn_after_attack.session)
             accuracy_atk = (logits.argmax(1) == _z_obs)[split_unlabeled].mean()
@@ -129,12 +130,12 @@ class Metattacker():
         if approximate_meta_gradient:
             gcn_attack = mtk.GNNMetaApprox(
                 _A_obs, _X_obs, labels_self_training, hidden_sizes,
-                gpu_id=self.GPU_ID, _lambda=lambda_, train_iters=self.train_iters, dtype=self.DTYPE
+                gpu_id=self.GPU_ID, _lambda=lambda_, train_iters=self.train_iters, dtype=self.dtype
             )
         else:
             gcn_attack = mtk.GNNMeta(
                 _A_obs, _X_obs.astype("float32"), labels_self_training, hidden_sizes,
-                gpu_id=self.GPU_ID, attack_features=False, train_iters=self.train_iters, dtype=self.DTYPE
+                gpu_id=self.GPU_ID, attack_features=False, train_iters=self.train_iters, dtype=self.dtype
             )
 
         # 5. 执行攻击

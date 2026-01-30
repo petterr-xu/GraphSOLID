@@ -7,6 +7,7 @@ from torch_geometric.data import InMemoryDataset, Dataset, HeteroData
 from torch_geometric.loader import ClusterData, ClusterLoader
 from .abstract_dataset import AbstractDataModule, AbstractDatasetInfos
 from src.DiGress.src import utils
+from torch_geometric.transforms import RandomNodeSplit
 
 from src.utils.graphbuilder import (
     extract_view_by_transform, 
@@ -102,8 +103,10 @@ class YelpChiHeteroDataset(Dataset):
         node_types, edge_types = self.original_data.node_types, self.original_data.edge_types
         all_hetero_subs = []
         for sub_homo in loader:
-            # 使用我们之前讨论过的更稳健的还原方式
+            # 还原为异构图
             sub_hetero = sub_homo.to_heterogeneous(node_type_names=node_types, edge_type_names=edge_types)
+            transform = RandomNodeSplit(num_val=0.2, num_test=0.4)
+            sub_hetero = transform(sub_hetero)
             all_hetero_subs.append(sub_hetero)
 
         random.seed(42)
