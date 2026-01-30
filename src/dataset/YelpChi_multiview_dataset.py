@@ -1,10 +1,10 @@
 import os
 import torch
 import random
+from tqdm import tqdm
 import os.path as osp
 import torch.nn.functional as F
-from torch_geometric.utils import subgraph
-from torch_geometric.utils import k_hop_subgraph
+from torch_geometric.utils import subgraph, k_hop_subgraph, random_walk
 from torch_geometric.transforms import RandomNodeSplit
 from torch_geometric.data import InMemoryDataset, Dataset, HeteroData, Data
 from torch_geometric.loader import ClusterData, ClusterLoader
@@ -69,7 +69,7 @@ class YelpChiMultiviewDataset(Dataset):
                 global_idx += 1
 
 class YelpChiHeteroDataset(Dataset):
-    def __init__(self, stage, root, original_data=None, num_parts=100, transform=None, pre_transform=None, strategy='random'):
+    def __init__(self, stage, root, original_data:HeteroData, num_parts=100, transform=None, pre_transform=None, strategy='random'):
         self.stage = stage
         self.original_data = original_data
         self.num_parts = num_parts
@@ -94,13 +94,15 @@ class YelpChiHeteroDataset(Dataset):
         path = osp.join(self.processed_dir, f'hetero_{self.stage}_{idx}.pt')
         return torch.load(path)
     
-    def cluster_partitioning(self, homo_data):
+    def cluster_partitioning(self):
+
+        homo_data = self.original_data.to_homogeneous()
         cluster_data = ClusterData(homo_data, num_parts=self.num_parts, recursive=False)
         loader = ClusterLoader(cluster_data, batch_size=1, shuffle=False)
 
         node_types, edge_types = self.original_data.node_types, self.original_data.edge_types
         all_hetero_subs = []
-        for sub_homo in loader:
+        for sub_homo in enumerate(tqdm(loader, desc='Sampling Subgraphs (cluster strategy)')):
             # 还原为异构图
             sub_hetero = sub_homo.to_heterogeneous(node_type_names=node_types, edge_type_names=edge_types)
             transform = RandomNodeSplit(num_val=0.2, num_test=0.4)
@@ -108,41 +110,38 @@ class YelpChiHeteroDataset(Dataset):
             all_hetero_subs.append(sub_hetero)
         return all_hetero_subs
     
-    def random_partitioning(self, homo_data):
-        num_nodes = homo_data.num_nodes
-        
-        # 2. 准备中心节点池
-        # 我们可以随机选 num_parts 个节点作为中心
+    def random_partitioning(self):
+        hetero = self.original_data
+        homo = hetero.to_homogeneous()
+        num_nodes = homo.num_nodes
+
         all_nodes = list(range(num_nodes))
         random.shuffle(all_nodes)
         center_nodes = all_nodes[:self.num_parts]
-        
-        node_types, edge_types = self.original_data.node_types, self.original_data.edge_types
+
         all_hetero_subs = []
 
-        from tqdm import tqdm
-        for i, center_node in enumerate(tqdm(center_nodes, desc="Sampling Subgraphs")):
-            # 3. 采样 2-hop 子图
-            # relabel_nodes=True 自动重排索引，num_hops=2 是常用配置
-            subset, sub_edge_index, mapping, edge_mask = k_hop_subgraph(
-                node_idx=center_node,
+        for center in tqdm(center_nodes, desc="Sampling Subgraphs"):
+            # 只用同构图做采样索引
+            subset, _, _, _ = k_hop_subgraph(
+                center,
                 num_hops=2,
-                edge_index=homo_data.edge_index,
-                relabel_nodes=True,
+                edge_index=homo.edge_index,
+                relabel_nodes=False,
                 num_nodes=num_nodes
             )
 
-            # 构建数据对象
-            sub_homo = Data(
-                x=homo_data.x[subset],
-                edge_index=sub_edge_index,
-                y=homo_data.y[subset] if hasattr(homo_data, 'y') else None
-            )
+            # 用 mask 回原异构图切子图
+            node_mask = torch.zeros(num_nodes, dtype=torch.bool)
+            node_mask[subset] = True
 
-            # 5. 转回异构图并划分 Mask
-            sub_hetero = sub_homo.to_heterogeneous(node_type_names=node_types, edge_type_names=edge_types)
+            sub_hetero = hetero.subgraph(node_mask)
+
+            # 划分训练集
             sub_hetero = RandomNodeSplit(num_val=0.2, num_test=0.4)(sub_hetero)
+
             all_hetero_subs.append(sub_hetero)
+
         return all_hetero_subs
 
     def process(self):
@@ -151,12 +150,11 @@ class YelpChiHeteroDataset(Dataset):
             raise ValueError("Processed files not found. Please provide 'original_data' to partition.")
 
         print(f"Partitioning original hetero-graph into {self.num_parts} parts...")
-        homo_data = self.original_data.to_homogeneous()
-        
+
         partition_func_map = {'cluster':self.cluster_partitioning, 'random':self.random_partitioning}
         if self.subgraph_strategy not in partition_func_map:
             raise ValueError(f"Unknown subgraph strategy: {self.subgraph_strategy}")
-        all_hetero_subs = partition_func_map[self.subgraph_strategy](homo_data)
+        all_hetero_subs = partition_func_map[self.subgraph_strategy]()
 
         random.seed(42)
         random.shuffle(all_hetero_subs)
