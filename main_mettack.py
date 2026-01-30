@@ -33,7 +33,7 @@ except ImportError:
 
 # ===================== 2. 全局配置 =====================
 SEED = 15
-SHARE_PERTURBATIONS = 0.5  # 扰动边的比例
+SHARE_PERTURBATIONS = 0.05  # 扰动边的比例
 DTYPE = tf.float32  # 内存不足可换tf.float16
 ATTACK_VARIANT = "Meta-Self"  # 攻击变体（可选：Meta-Train/Meta-Self/A-Meta-Train等）
 ENFORCE_LL_CONSTRAINT = False

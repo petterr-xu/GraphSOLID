@@ -4,7 +4,7 @@ import random
 from tqdm import tqdm
 import os.path as osp
 import torch.nn.functional as F
-from torch_geometric.utils import subgraph, k_hop_subgraph, random_walk
+from torch_geometric.utils import subgraph, k_hop_subgraph
 from torch_geometric.transforms import RandomNodeSplit
 from torch_geometric.data import InMemoryDataset, Dataset, HeteroData, Data
 from torch_geometric.loader import ClusterData, ClusterLoader
@@ -94,6 +94,20 @@ class YelpChiHeteroDataset(Dataset):
         path = osp.join(self.processed_dir, f'hetero_{self.stage}_{idx}.pt')
         return torch.load(path)
     
+    def _build_type_ptr(self):
+        ptr = {}
+        offset = 0
+        for ntype in self.original_data.node_types:
+            ptr[ntype] = offset
+            offset += self.original_data[ntype].num_nodes
+        return ptr
+    
+    def _cap_subset(self, subset, max_nodes):
+        if subset.numel() <= max_nodes:
+            return subset
+        perm = torch.randperm(subset.numel())
+        return subset[perm[:max_nodes]]
+    
     def cluster_partitioning(self):
 
         homo_data = self.original_data.to_homogeneous()
@@ -114,6 +128,8 @@ class YelpChiHeteroDataset(Dataset):
         hetero = self.original_data
         homo = hetero.to_homogeneous()
         num_nodes = homo.num_nodes
+        type_ptr = self._build_type_ptr()
+        type_id_map = {ntype: i for i, ntype in enumerate(hetero.node_types)}
 
         all_nodes = list(range(num_nodes))
         random.shuffle(all_nodes)
@@ -121,8 +137,11 @@ class YelpChiHeteroDataset(Dataset):
 
         all_hetero_subs = []
 
-        for center in tqdm(center_nodes, desc="Sampling Subgraphs"):
-            # 只用同构图做采样索引
+        max_size = -1
+        min_size = self.original_data.num_nodes
+        size_count = 0
+        for center in tqdm(center_nodes, desc="Sampling Subgraphs (random strategy)"):
+            # 同构空间采样
             subset, _, _, _ = k_hop_subgraph(
                 center,
                 num_hops=2,
@@ -131,16 +150,34 @@ class YelpChiHeteroDataset(Dataset):
                 num_nodes=num_nodes
             )
 
-            # 用 mask 回原异构图切子图
-            node_mask = torch.zeros(num_nodes, dtype=torch.bool)
-            node_mask[subset] = True
+            subset = subset.cpu()
+            subset = self._cap_subset(subset, 200)
+            node_types = homo.node_type[subset]
 
-            sub_hetero = hetero.subgraph(node_mask)
+            subset_dict = {}
 
-            # 划分训练集
+            for ntype in hetero.node_types:
+                tid = type_id_map[ntype]
+                mask = node_types == tid
+
+                if mask.sum() == 0:
+                    continue
+
+                global_ids = subset[mask]
+                local_ids = global_ids - type_ptr[ntype]
+
+                subset_dict[ntype] = local_ids
+
+            sub_hetero = hetero.subgraph(subset_dict)
             sub_hetero = RandomNodeSplit(num_val=0.2, num_test=0.4)(sub_hetero)
 
+            max_size = max(max_size, sub_hetero.num_nodes)
+            min_size = min(min_size, sub_hetero.num_nodes)
+            size_count += sub_hetero.num_nodes
+
             all_hetero_subs.append(sub_hetero)
+
+        print(f"Max subgraph size: {max_size}, Min subgraph size: {min_size}, Avg size: {size_count / self.num_parts}")
 
         return all_hetero_subs
 
