@@ -44,7 +44,17 @@ class Metattacker():
             if isinstance(data, HeteroData):
                 data = data.to_homogeneous()
             _A_obs, _X_obs, _z_obs, _Z_obs, _N, _K, data_mask = graphbuilder.pyg2matrix(data)
+
             split_train, split_val, split_unlabeled = graphbuilder.split_dataset_by_pyg_mask(data_mask)
+
+            print(f"--- Debugging Subgraph ---")
+            print(f"Nodes: {_N}, Edges: {_A_obs.sum()/2}")
+            print(f"Perturbations: {self.share_perturbations * (_A_obs.sum()//2)}")
+            print(f"Train nodes: {len(split_train)}, Test nodes: {len(split_unlabeled)}")
+
+            # 检查是否存在越界索引
+            if len(split_unlabeled) > 0 and split_unlabeled.max() >= _N:
+                print(f"CRITICAL: Test index {split_unlabeled.max()} out of bounds for graph size {_N}!")
 
             pbar.set_description(f"Attacking subgraph (Nodes: {_N})")
             modified_adjacency = self._run_meta_attack_on_single_graph(
