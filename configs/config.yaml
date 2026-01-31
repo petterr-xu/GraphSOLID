@@ -9,7 +9,8 @@ hydra:
   job:
     chdir: True
   run:
-    dir: /root/autodl-tmp/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}-${general.name}
+    dir: /root/autodl-tmp/outputs/curr/${general.name}
+    # dir: /root/autodl-tmp/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}-${general.name}
 
 
 

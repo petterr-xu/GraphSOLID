@@ -1,13 +1,14 @@
 import os
 import torch
 import random
+import numpy as np
 from tqdm import tqdm
 import os.path as osp
 import torch.nn.functional as F
 from torch_geometric.utils import subgraph, k_hop_subgraph
 from torch_geometric.transforms import RandomNodeSplit
 from torch_geometric.data import InMemoryDataset, Dataset, HeteroData, Data
-from torch_geometric.loader import ClusterData, ClusterLoader
+from torch_geometric.loader import ClusterData, ClusterLoader, HGTLoader
 from .abstract_dataset import AbstractDataModule, AbstractDatasetInfos
 from src.DiGress.src import utils
 from torch_geometric.transforms import RandomNodeSplit
@@ -69,10 +70,11 @@ class YelpChiMultiviewDataset(Dataset):
                 global_idx += 1
 
 class YelpChiHeteroDataset(Dataset):
-    def __init__(self, stage, root, original_data:HeteroData, num_parts=100, transform=None, pre_transform=None, strategy='random'):
+    def __init__(self, stage, root, original_data:HeteroData, target_node_type, num_parts=100, transform=None, pre_transform=None, strategy='HGT'):
         self.stage = stage
         self.original_data = original_data
         self.num_parts = num_parts
+        self.target_node_type = target_node_type
         # 计算各阶段应有的数量（用于 len()）
         self.train_n = int(num_parts * 0.8)
         self.val_n = int(num_parts * 0.1)
@@ -107,6 +109,77 @@ class YelpChiHeteroDataset(Dataset):
             return subset
         perm = torch.randperm(subset.numel())
         return subset[perm[:max_nodes]]
+    
+    def _validate_label_coverage(self, sub_hetero, target_type):
+        if not hasattr(sub_hetero[target_type], "y"):
+            return True
+
+        sub_labels = sub_hetero[target_type].y.cpu().numpy()
+        orig_labels = self.original_data[target_type].y.cpu().numpy()
+
+        return set(np.unique(sub_labels)) == set(np.unique(orig_labels))
+    
+    def HGT_partitioning(self):
+        self.num_hops = 2
+        self.fanout = 20
+        hetero = self.original_data
+        target_type = self.target_node_type
+
+        target_nodes = torch.arange(hetero[target_type].num_nodes)
+        perm = torch.randperm(len(target_nodes))
+        target_nodes = target_nodes[perm]
+
+        # seed_nodes = target_nodes[:self.num_parts]
+
+        num_samples = {
+            ntype: [self.fanout] * self.num_hops
+            for ntype in hetero.node_types
+        }
+
+        loader = HGTLoader(
+            data=hetero,
+            input_nodes=(target_type, target_nodes),
+            num_samples=num_samples,
+            batch_size=1,
+            shuffle=False
+        )
+
+        all_hetero_subs = []
+
+        max_size = 0
+        min_size = float("inf")
+        size_count = 0
+        sub_nums = 0
+
+        pbar = tqdm(total=self.num_parts, desc="Sampling Subgraphs (HGT)", ncols=120)
+        for batch in loader:
+            sub_hetero = batch
+
+            if not self._validate_label_coverage(sub_hetero, target_type):
+                continue
+            else:
+                sub_nums += 1
+
+            sub_hetero = RandomNodeSplit(num_val=0.2, num_test=0.4)(sub_hetero)
+
+            n = sub_hetero.num_nodes
+            max_size = max(max_size, n)
+            min_size = min(min_size, n)
+            size_count += n
+            all_hetero_subs.append(sub_hetero)
+
+            pbar.update(1)
+            pbar.set_postfix({
+                "size": n,
+                "avg": f"{size_count / sub_nums:.1f}",
+                "max": max_size,
+                "reject": f"{(pbar.n / (pbar.n + (len(all_hetero_subs)))):.2f}"
+            })
+            
+            if sub_nums >= self.num_parts:
+                break
+
+        return all_hetero_subs
     
     def cluster_partitioning(self):
 
@@ -188,7 +261,7 @@ class YelpChiHeteroDataset(Dataset):
 
         print(f"Partitioning original hetero-graph into {self.num_parts} parts...")
 
-        partition_func_map = {'cluster':self.cluster_partitioning, 'random':self.random_partitioning}
+        partition_func_map = {'cluster':self.cluster_partitioning, 'random':self.random_partitioning, 'HGT':self.HGT_partitioning}
         if self.subgraph_strategy not in partition_func_map:
             raise ValueError(f"Unknown subgraph strategy: {self.subgraph_strategy}")
         all_hetero_subs = partition_func_map[self.subgraph_strategy]()
@@ -215,9 +288,9 @@ class YelpChihDataModule(AbstractDataModule):
         self.target = cfg.dataset.target
         self.num_parts = cfg.dataset.num_parts
         # 构造异构图数据集
-        train_hetero = YelpChiHeteroDataset('train', self.root, self.hetero_graph, self.num_parts)
-        val_hetero = YelpChiHeteroDataset('val', self.root, self.hetero_graph, self.num_parts)
-        test_hetero = YelpChiHeteroDataset('test', self.root, self.hetero_graph, self.num_parts)
+        train_hetero = YelpChiHeteroDataset('train', self.root, self.hetero_graph, self.target, self.num_parts)
+        val_hetero = YelpChiHeteroDataset('val', self.root, self.hetero_graph, self.target, self.num_parts)
+        test_hetero = YelpChiHeteroDataset('test', self.root, self.hetero_graph, self.target, self.num_parts)
         self.hetero_datasets = {
             'train': train_hetero,
             'val': val_hetero,

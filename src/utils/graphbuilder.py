@@ -77,8 +77,14 @@ def pyg2matrix(data: Data):
     # 6. 转换标签：PyTorch张量 → NumPy数组（one-hot）
     _z_obs = data.y.cpu().numpy().squeeze()
     _z_obs = _z_obs[lcc]  # 映射到最大连通子图
-    _K = len(np.unique(_z_obs))  # 类别数
-    _Z_obs = np.eye(_K)[_z_obs]
+    # 重新映射标签到 0...K-1
+    unique_labels = np.unique(_z_obs)
+    label_map = {old: new for new, old in enumerate(unique_labels)}
+
+    _z_obs = np.array([label_map[z] for z in _z_obs], dtype=np.int64)
+
+    _K = len(unique_labels)
+    _Z_obs = np.eye(_K, dtype=np.float32)[_z_obs]
 
     # 7. 处理PyG自带的mask → 映射到最大连通子图后的索引
     _N = _A_obs.shape[0]  # 最大连通子图节点数

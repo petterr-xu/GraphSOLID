@@ -17,10 +17,15 @@ def quiet_tqdm(*args, **kwargs):
     return tqdm(*args, **kwargs)
 mtk.tqdm = quiet_tqdm
 
-class Metattacker():
-    def __init__(self, dataset_module:AbstractDataModule, share_perturbations, classifier, attack_varient='Meta-Self', re_trainings=5, device=0, train_iters = 200):
-        super().__init__()
+class Attacker():
+    def __init__(self, dataset_module:AbstractDataModule):
         self.dataset_module = dataset_module
+    def attack(self):
+        pass
+
+class Metattacker(Attacker):
+    def __init__(self, dataset_module:AbstractDataModule, share_perturbations, attack_varient='Meta-Self', re_trainings=5, device=0, train_iters = 200):
+        super().__init__(dataset_module)
         self.GPU_ID = device
         self.share_perturbations = share_perturbations
         self.train_iters = train_iters
@@ -29,7 +34,8 @@ class Metattacker():
         self.ENFORCE_LL_CONSTRAINT = False
         self.attack_variant = attack_varient
 
-        self.classifier = classifier
+    def attack(self,data):
+        return data
 
     def poison(self):
         """
