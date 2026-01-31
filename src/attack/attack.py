@@ -3,6 +3,7 @@ import numpy as np
 from tqdm import tqdm
 import tensorflow as tf
 import scipy.sparse as sp
+from typing import Optional, Tuple
 from torch_geometric.data import Data, HeteroData
 
 from src.utils import graphbuilder
@@ -23,6 +24,243 @@ class Attacker():
         self.dataset_module = dataset_module
     def attack(self,data):
         return data
+
+class RandomAttacker(Attacker):
+    """
+    Randomly perturb a fixed ratio of edges on the *original HeteroData* (no to_homogeneous()).
+
+    Behavior:
+    - For each edge_type in a HeteroData, delete k edges and add k new edges, where
+      k = floor(perturb_ratio * num_edges_of_that_edge_type).
+      (So every relation is perturbed with the same ratio.)
+    - Only edge structure (edge_index) is changed.
+    - Node/edge attributes are preserved as much as possible:
+        * existing edge_attr (if any) is kept for retained edges
+        * new edges get zero edge_attr with the same feature dimension (if edge_attr exists)
+    - For Data (homogeneous) input, it perturbs the single edge_index similarly.
+
+    Notes:
+    - For (src_type == dst_type), self-loops are avoided by default (allow_self_loops=False).
+    - Duplicated edges are avoided.
+    """
+
+    def __init__(
+        self,
+        dataset_module,
+        perturb_ratio: float = 0.05,
+        seed: Optional[int] = None,
+        allow_self_loops: bool = False,
+        max_sampling_rounds: int = 50,
+        oversample_factor: int = 5,
+    ):
+        super().__init__(dataset_module)
+        assert 0.0 <= perturb_ratio <= 1.0
+        self.perturb_ratio = float(perturb_ratio)
+        self.seed = seed
+        self.allow_self_loops = allow_self_loops
+        self.max_sampling_rounds = int(max_sampling_rounds)
+        self.oversample_factor = int(oversample_factor)
+
+    @staticmethod
+    def _hash_edges(src: torch.Tensor, dst: torch.Tensor, num_dst: int) -> torch.Tensor:
+        # unique id for each directed edge (src, dst)
+        return src.to(torch.long) * int(num_dst) + dst.to(torch.long)
+
+    def _sample_new_edges(
+        self,
+        num_src: int,
+        num_dst: int,
+        k: int,
+        existing_hash: torch.Tensor,
+        device: torch.device,
+        forbid_self_loops: bool,
+        generator: Optional[torch.Generator],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Sample k new edges not in existing_hash.
+        Returns (new_src, new_dst) each shape [k].
+        """
+        if k <= 0:
+            return (torch.empty(0, dtype=torch.long, device=device),
+                    torch.empty(0, dtype=torch.long, device=device))
+
+        existing = existing_hash
+        new_src_list = []
+        new_dst_list = []
+
+        remaining = k
+        for _ in range(self.max_sampling_rounds):
+            if remaining <= 0:
+                break
+
+            m = max(remaining * self.oversample_factor, remaining + 10)
+            cand_src = torch.randint(0, num_src, (m,), device=device, generator=generator)
+            cand_dst = torch.randint(0, num_dst, (m,), device=device, generator=generator)
+
+            if forbid_self_loops and num_src == num_dst:
+                mask = cand_src != cand_dst
+                cand_src, cand_dst = cand_src[mask], cand_dst[mask]
+                if cand_src.numel() == 0:
+                    continue
+
+            cand_hash = self._hash_edges(cand_src, cand_dst, num_dst)
+
+            # Filter out existing edges
+            keep = ~torch.isin(cand_hash, existing)
+            cand_src, cand_dst, cand_hash = cand_src[keep], cand_dst[keep], cand_hash[keep]
+            if cand_src.numel() == 0:
+                continue
+
+            # Deduplicate candidates themselves
+            cand_hash, uniq_idx = torch.unique(cand_hash, return_inverse=False, return_counts=False, sorted=False, return_index=True)
+            cand_src = cand_src[uniq_idx]
+            cand_dst = cand_dst[uniq_idx]
+
+            take = min(remaining, cand_src.numel())
+            if take <= 0:
+                continue
+
+            new_src_list.append(cand_src[:take])
+            new_dst_list.append(cand_dst[:take])
+
+            # Update existing set with newly taken edges to prevent duplicates across rounds
+            taken_hash = self._hash_edges(cand_src[:take], cand_dst[:take], num_dst)
+            existing = torch.cat([existing, taken_hash], dim=0)
+
+            remaining -= take
+
+        if len(new_src_list) == 0:
+            return (torch.empty(0, dtype=torch.long, device=device),
+                    torch.empty(0, dtype=torch.long, device=device))
+
+        new_src = torch.cat(new_src_list, dim=0)
+        new_dst = torch.cat(new_dst_list, dim=0)
+
+        if new_src.numel() > k:
+            new_src = new_src[:k]
+            new_dst = new_dst[:k]
+
+        return new_src, new_dst
+
+    def _perturb_edge_index(
+        self,
+        edge_index: torch.Tensor,
+        num_src: int,
+        num_dst: int,
+        edge_attr: Optional[torch.Tensor],
+        generator: Optional[torch.Generator],
+        forbid_self_loops: bool,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Delete k edges and add k new edges. Return (new_edge_index, new_edge_attr).
+        """
+        device = edge_index.device
+        E = edge_index.size(1)
+        k = int(self.perturb_ratio * E)
+
+        if E == 0 or k == 0:
+            return edge_index, edge_attr
+
+        # 1) random delete k edges
+        perm = torch.randperm(E, device=device, generator=generator)
+        del_idx = perm[:k]
+        keep_mask = torch.ones(E, dtype=torch.bool, device=device)
+        keep_mask[del_idx] = False
+
+        kept_edge_index = edge_index[:, keep_mask]
+
+        kept_edge_attr = None
+        if edge_attr is not None:
+            kept_edge_attr = edge_attr[keep_mask]
+
+        # 2) random add k new edges
+        src, dst = kept_edge_index[0], kept_edge_index[1]
+        existing_hash = self._hash_edges(src, dst, num_dst)
+        new_src, new_dst = self._sample_new_edges(
+            num_src=num_src,
+            num_dst=num_dst,
+            k=k,
+            existing_hash=existing_hash,
+            device=device,
+            forbid_self_loops=forbid_self_loops,
+            generator=generator,
+        )
+
+        if new_src.numel() == 0:
+            return kept_edge_index, kept_edge_attr
+
+        added_edge_index = torch.stack([new_src, new_dst], dim=0)
+        new_edge_index = torch.cat([kept_edge_index, added_edge_index], dim=1)
+
+        # edge_attr: preserve kept; added edges -> zeros
+        new_edge_attr = kept_edge_attr
+        if edge_attr is not None:
+            if edge_attr.dim() >= 2:
+                feat_dim = edge_attr.size(-1)
+                added_attr = torch.zeros((added_edge_index.size(1), feat_dim), device=device, dtype=edge_attr.dtype)
+            else:
+                added_attr = torch.zeros((added_edge_index.size(1),), device=device, dtype=edge_attr.dtype)
+            new_edge_attr = torch.cat([kept_edge_attr, added_attr], dim=0)
+
+        return new_edge_index, new_edge_attr
+
+    def attack(self, data):
+        # Setup RNG
+        generator = None
+        if self.seed is not None:
+            generator = torch.Generator()
+            generator.manual_seed(self.seed)
+
+        # Homogeneous graph case
+        if isinstance(data, Data):
+            out = data.clone()
+            num_nodes = out.num_nodes
+            forbid_self_loops = (not self.allow_self_loops)
+            new_ei, new_ea = self._perturb_edge_index(
+                edge_index=out.edge_index,
+                num_src=num_nodes,
+                num_dst=num_nodes,
+                edge_attr=getattr(out, "edge_attr", None),
+                generator=generator,
+                forbid_self_loops=forbid_self_loops,
+            )
+            out.edge_index = new_ei
+            if getattr(out, "edge_attr", None) is not None:
+                out.edge_attr = new_ea
+            return out
+
+        # Heterogeneous graph case (recommended)
+        if not isinstance(data, HeteroData):
+            return data
+
+        out = data.clone()
+
+        for edge_type in out.edge_types:
+            store = out[edge_type]
+            if not hasattr(store, "edge_index") or store.edge_index is None:
+                continue
+
+            src_type, _, dst_type = edge_type
+            num_src = out[src_type].num_nodes
+            num_dst = out[dst_type].num_nodes
+
+            forbid_self_loops = (src_type == dst_type) and (not self.allow_self_loops)
+
+            edge_attr = getattr(store, "edge_attr", None)
+            new_ei, new_ea = self._perturb_edge_index(
+                edge_index=store.edge_index,
+                num_src=num_src,
+                num_dst=num_dst,
+                edge_attr=edge_attr,
+                generator=generator,
+                forbid_self_loops=forbid_self_loops,
+            )
+
+            store.edge_index = new_ei
+            if edge_attr is not None:
+                store.edge_attr = new_ea
+
+        return out
 
 class Metattacker(Attacker):
     def __init__(self, dataset_module:AbstractDataModule, share_perturbations, attack_varient='Meta-Self', re_trainings=5, device=0, train_iters = 200):
