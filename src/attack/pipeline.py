@@ -1,96 +1,146 @@
 import os
 import json
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
-
 
 from .attack import Attacker
 from .defend import Defender
 from src.dataset.abstract_dataset import AbstractDataModule
 
+
 class DefaultPipeline:
-    def __init__(self, dataset_module:AbstractDataModule,defender:Defender,attacker:Attacker,classifier:nn.Module):
+    """
+    Evaluate a classifier under three settings on a dataset of hetero subgraphs:
+      1) clean graphs
+      2) attacked graphs  (attacker.attack)
+      3) defended graphs  (defender.defend applied on attacked graphs)
+
+    IMPORTANT for this repo:
+    - YelpChihDataModule provides hetero subgraph datasets via `dataset_module.hetero_datasets`,
+      where each item is a HeteroData with {train,val,test}_mask on the target node type.
+    - HeteroNN.HeteroGNN_classifier.forward(x_dict, edge_index_dict) returns logits for ALL nodes
+      of `classifier.target_node` (same ordering as data[target].y/mask).
+
+    This pipeline will:
+    - iterate over dataset_module.hetero_datasets[split]
+    - compute micro-accuracy across all evaluation nodes (mask==True) over all subgraphs
+    - save detailed per-subgraph predictions for later analysis
+    """
+
+    def __init__(
+        self,
+        dataset_module: AbstractDataModule,
+        defender: Defender,
+        attacker: Attacker,
+        classifier: nn.Module,
+    ):
         self.dataset_module = dataset_module
         self.defender = defender
         self.attacker = attacker
         self.classifier = classifier
 
     def attack_onely(self):
-        # (Optional) kept for backward compatibility
         raise NotImplementedError
 
     # -----------------------------
-    # Utilities
+    # Dataset / config helpers
     # -----------------------------
-    def _infer_graph(self):
-        """Best-effort fetch of the (test) graph from dataset_module."""
+    def _get_split_dataset(self, split: str):
         dm = self.dataset_module
-        for attr in [
-            "test_data",
-            "test_graph",
-            "data",
-            "graph",
-        ]:
+        if hasattr(dm, "hetero_datasets") and isinstance(dm.hetero_datasets, dict):
+            if split not in dm.hetero_datasets:
+                raise KeyError(f"dataset_module.hetero_datasets has no split '{split}'.")
+            return dm.hetero_datasets[split]
+
+        # fallback (older style) - try dm.<split>_dataset
+        for attr in [f"{split}_dataset", f"{split}_data", f"{split}_graph"]:
             if hasattr(dm, attr):
-                g = getattr(dm, attr)
-                if g is not None:
-                    return g
-        # common getter names
-        for fn in ["get_test_data", "get_test_graph", "get_data", "get_graph"]:
-            if hasattr(dm, fn) and callable(getattr(dm, fn)):
-                g = getattr(dm, fn)()
-                if g is not None:
-                    return g
+                ds = getattr(dm, attr)
+                if ds is not None:
+                    return ds
+
         raise AttributeError(
-            "Cannot infer graph from dataset_module. Expected one of: test_data/test_graph/data/graph or get_*()."
+            "Cannot locate split dataset. Expected dataset_module.hetero_datasets[split] or dataset_module.<split>_dataset."
         )
 
-    def _infer_target_type(self, data):
-        """Infer target node type for hetero graphs."""
-        # 1) dataset module hint
+    def _infer_target_type(self, sample_graph) -> str:
+        dm = self.dataset_module
+        # YelpChi style: dm.target
+        if hasattr(dm, "target") and isinstance(dm.target, str) and len(dm.target) > 0:
+            return dm.target
+        # common names
         for attr in ["target_node_type", "target_type", "target_node"]:
-            if hasattr(self.dataset_module, attr):
-                v = getattr(self.dataset_module, attr)
+            if hasattr(dm, attr):
+                v = getattr(dm, attr)
                 if isinstance(v, str) and len(v) > 0:
                     return v
-        # 2) classifier hint
+        # classifier hint
         if hasattr(self.classifier, "target_node") and isinstance(self.classifier.target_node, str):
             return self.classifier.target_node
-        # 3) fallback: single node type
-        if hasattr(data, "node_types") and len(data.node_types) == 1:
-            return data.node_types[0]
-        raise AttributeError(
-            "Cannot infer target node type. Please set dataset_module.target_node_type or classifier.target_node."
-        )
+        # last resort
+        if hasattr(sample_graph, "node_types") and len(sample_graph.node_types) == 1:
+            return sample_graph.node_types[0]
+        raise AttributeError("Cannot infer target node type. Please set datamodule.target or classifier.target_node.")
 
+    def _resolve_output_dir(self) -> str:
+        dm = self.dataset_module
+
+        # If cfg exists, try common places
+        if hasattr(dm, "cfg"):
+            cfg = dm.cfg
+            for path_attr in ["out_dir", "output_dir", "log_dir", "save_dir", "result_dir"]:
+                if hasattr(cfg, path_attr):
+                    d = getattr(cfg, path_attr)
+                    if isinstance(d, str) and len(d) > 0:
+                        os.makedirs(d, exist_ok=True)
+                        return d
+
+        # Try datamodule itself
+        for attr in ["out_dir", "output_dir", "log_dir", "save_dir", "result_dir"]:
+            if hasattr(dm, attr):
+                d = getattr(dm, attr)
+                if isinstance(d, str) and len(d) > 0:
+                    os.makedirs(d, exist_ok=True)
+                    return d
+
+        # Fall back to dataset root if present
+        if hasattr(dm, "root") and isinstance(dm.root, str) and len(dm.root) > 0:
+            d = os.path.join(dm.root, "pipeline_outputs")
+            os.makedirs(d, exist_ok=True)
+            return d
+
+        d = os.path.join(os.getcwd(), "pipeline_outputs")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    # -----------------------------
+    # Evaluation helpers
+    # -----------------------------
     @torch.no_grad()
-    def _eval_classifier_on_graph(self, data, split: str = "test") -> Dict[str, Any]:
-        """Evaluate classifier and collect predictions/metrics on a given (hetero/homo) PyG graph."""
+    def _eval_classifier_on_graph(self, graph, split: str, target_type: str) -> Dict[str, Any]:
+        """
+        Evaluate classifier on ONE graph sample and return per-node predictions (masked) + metrics.
+        """
         self.classifier.eval()
-
         device = next(self.classifier.parameters()).device
-        data = data.to(device)
 
-        # HeteroData vs Data dispatch
-        if hasattr(data, "x_dict") and hasattr(data, "edge_index_dict"):
-            logits = self.classifier(data.x_dict, data.edge_index_dict)
-            target_type = self._infer_target_type(data)
-            y = data[target_type].y
-            mask_name = f"{split}_mask"
-            if not hasattr(data[target_type], mask_name):
-                raise AttributeError(f"Target node store lacks mask: {target_type}.{mask_name}")
-            mask = getattr(data[target_type], mask_name)
+        g = graph.to(device)
+
+        # HeteroNN classifier expects (x_dict, edge_index_dict) for hetero graphs.
+        if hasattr(g, "x_dict") and hasattr(g, "edge_index_dict"):
+            logits = self.classifier(g.x_dict, g.edge_index_dict)
+            y = g[target_type].y
+            mask = getattr(g[target_type], f"{split}_mask")
         else:
-            logits = self.classifier(data.x, data.edge_index) if callable(self.classifier) else self.classifier(data)
-            y = data.y
-            mask_name = f"{split}_mask"
-            if not hasattr(data, mask_name):
-                raise AttributeError(f"Graph lacks mask: {mask_name}")
-            mask = getattr(data, mask_name)
+            # homogeneous fallback
+            logits = self.classifier(g)
+            y = g.y
+            mask = getattr(g, f"{split}_mask")
 
-        # Ensure shapes
+        # labels might be one-hot
         if y.dim() > 1 and y.size(-1) > 1:
             y_true = y.argmax(dim=-1)
         else:
@@ -99,120 +149,166 @@ class DefaultPipeline:
         pred = logits.argmax(dim=-1)
 
         idx = mask.nonzero(as_tuple=False).view(-1)
-        if idx.numel() == 0:
+        num = int(idx.numel())
+        if num == 0:
+            correct = 0
             acc = float("nan")
         else:
-            acc = (pred[idx] == y_true[idx]).float().mean().item()
+            correct = int((pred[idx] == y_true[idx]).sum().item())
+            acc = correct / num
 
-        # Also keep raw logits for later analysis
-        out = {
+        return {
             "acc": acc,
-            "num_eval": int(idx.numel()),
-            "y_true": y_true.detach().cpu(),
-            "y_pred": pred.detach().cpu(),
-            "logits": logits.detach().cpu(),
-            "mask": mask.detach().cpu(),
+            "num_eval": num,
+            "num_correct": correct,
+            "y_true": y_true[idx].detach().cpu(),
+            "y_pred": pred[idx].detach().cpu(),
+            "logits": logits[idx].detach().cpu(),
+            "node_idx": idx.detach().cpu(),
         }
-        return out
 
-    def _resolve_output_dir(self) -> str:
-        for attr in ["output_dir", "out_dir", "log_dir", "save_dir", "result_dir"]:
-            if hasattr(self.dataset_module, attr):
-                d = getattr(self.dataset_module, attr)
-                if isinstance(d, str) and len(d) > 0:
-                    os.makedirs(d, exist_ok=True)
-                    return d
-        # default: current working directory
-        d = os.getcwd()
-        return d
+    def _eval_over_dataset(
+        self,
+        dataset,
+        split: str,
+        target_type: str,
+        transform_fn=None,
+        desc: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Iterate dataset (assumed indexable Dataset of HeteroData samples).
+        Optionally apply transform_fn(graph)->graph per sample before evaluation.
+
+        Returns micro metrics + per-sample prediction records.
+        """
+        total_eval = 0
+        total_correct = 0
+        per_sample: List[Dict[str, Any]] = []
+
+        # Deterministic order; dataset is already a processed on-disk dataset.
+        for i in range(len(dataset)):
+            g = dataset[i]
+            if transform_fn is not None:
+                # clone to avoid writing back into cached dataset items
+                g_in = g.clone() if hasattr(g, "clone") else g
+                g = transform_fn(g_in)
+
+            res = self._eval_classifier_on_graph(g, split=split, target_type=target_type)
+
+            total_eval += res["num_eval"]
+            total_correct += res["num_correct"]
+
+            per_sample.append(
+                {
+                    "sample_id": i,
+                    "num_eval": res["num_eval"],
+                    "num_correct": res["num_correct"],
+                    "acc": res["acc"],
+                    "y_true": res["y_true"],
+                    "y_pred": res["y_pred"],
+                    "logits": res["logits"],
+                    "node_idx": res["node_idx"],  # indices within this subgraph's target node store
+                }
+            )
+
+        micro_acc = float("nan") if total_eval == 0 else (total_correct / total_eval)
+
+        return {
+            "micro_acc": micro_acc,
+            "total_eval": int(total_eval),
+            "total_correct": int(total_correct),
+            "per_sample": per_sample,
+        }
 
     # -----------------------------
-    # Main pipeline
+    # Main API
     # -----------------------------
     def defend_after_attack(self, split: str = "test") -> Dict[str, Any]:
         """
-        Evaluate classifier on:
-          1) clean split graph
-          2) attacked graph (attacker.attack)
-          3) purified graph (defender.defend applied on attacked graph)
-        Collect predictions and save outputs.
+        Evaluate classifier on clean / attacked / defended versions of the hetero subgraph dataset.
 
-        Returns a dict with all metrics and predictions.
+        Flow:
+          clean:   eval(dataset[i])
+          attacked: eval(attacker.attack(dataset[i]))
+          defended: eval(defender.defend(attacker.attack(dataset[i])))
+
+        Outputs:
+          - {split}_defend_after_attack_results.pt  (full tensors)
+          - {split}_defend_after_attack_metrics.json (metrics only)
         """
-        base_graph = self._infer_graph()
+        ds = self._get_split_dataset(split)
 
-        # 1) Clean evaluation
-        clean_graph = base_graph.clone() if hasattr(base_graph, "clone") else base_graph
-        clean_res = self._eval_classifier_on_graph(clean_graph, split=split)
+        # infer target type from first sample
+        sample0 = ds[0] if len(ds) > 0 else None
+        if sample0 is None:
+            raise ValueError(f"Empty dataset for split='{split}'.")
+        target_type = self._infer_target_type(sample0)
 
-        # 2) Attack evaluation (avoid in-place modification surprises)
-        attacked_in = base_graph.clone() if hasattr(base_graph, "clone") else base_graph
-        attacked_graph = self.attacker.attack(attacked_in)
-        attacked_res = self._eval_classifier_on_graph(attacked_graph, split=split)
+        # 1) clean
+        clean = self._eval_over_dataset(
+            dataset=ds, split=split, target_type=target_type, transform_fn=None, desc="clean"
+        )
 
-        # 3) Defend evaluation
-        defended_in = attacked_graph.clone() if hasattr(attacked_graph, "clone") else attacked_graph
-        defended_graph = self.defender.defend(defended_in)
-        defended_res = self._eval_classifier_on_graph(defended_graph, split=split)
+        # 2) attacked
+        attacked = self._eval_over_dataset(
+            dataset=ds,
+            split=split,
+            target_type=target_type,
+            transform_fn=lambda g: self.attacker.attack(g),
+            desc="attacked",
+        )
 
-        # Package results
-        summary = {
+        # 3) defended (attack then defend)
+        defended = self._eval_over_dataset(
+            dataset=ds,
+            split=split,
+            target_type=target_type,
+            transform_fn=lambda g: self.defender.defend(self.attacker.attack(g)),
+            desc="defended",
+        )
+
+        summary: Dict[str, Any] = {
             "split": split,
+            "target_type": target_type,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "metrics": {
-                "clean_acc": clean_res["acc"],
-                "attacked_acc": attacked_res["acc"],
-                "defended_acc": defended_res["acc"],
-                "clean_num": clean_res["num_eval"],
-                "attacked_num": attacked_res["num_eval"],
-                "defended_num": defended_res["num_eval"],
+                "clean_micro_acc": clean["micro_acc"],
+                "attacked_micro_acc": attacked["micro_acc"],
+                "defended_micro_acc": defended["micro_acc"],
+                "clean_total_eval": clean["total_eval"],
+                "attacked_total_eval": attacked["total_eval"],
+                "defended_total_eval": defended["total_eval"],
             },
-            "predictions": {
-                "clean": {
-                    "y_true": clean_res["y_true"],
-                    "y_pred": clean_res["y_pred"],
-                    "logits": clean_res["logits"],
-                    "mask": clean_res["mask"],
-                },
-                "attacked": {
-                    "y_true": attacked_res["y_true"],
-                    "y_pred": attacked_res["y_pred"],
-                    "logits": attacked_res["logits"],
-                    "mask": attacked_res["mask"],
-                },
-                "defended": {
-                    "y_true": defended_res["y_true"],
-                    "y_pred": defended_res["y_pred"],
-                    "logits": defended_res["logits"],
-                    "mask": defended_res["mask"],
-                },
+            "details": {
+                "clean": clean,
+                "attacked": attacked,
+                "defended": defended,
             },
         }
 
-        # Save outputs
         out_dir = self._resolve_output_dir()
         tag = f"{split}_defend_after_attack"
         pt_path = os.path.join(out_dir, f"{tag}_results.pt")
         json_path = os.path.join(out_dir, f"{tag}_metrics.json")
 
-        # torch.save can store tensors directly
+        # Save full tensors
         torch.save(summary, pt_path)
 
-        # JSON for quick look (tensors -> python scalars/lists)
-        json_payload = {
+        # Save metrics-only JSON
+        metrics_only = {
             "split": summary["split"],
+            "target_type": summary["target_type"],
             "timestamp": summary["timestamp"],
             "metrics": summary["metrics"],
         }
         with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(json_payload, f, ensure_ascii=False, indent=2)
+            json.dump(metrics_only, f, ensure_ascii=False, indent=2)
 
-        # Optional: print a concise line
         print(
-            f"[{tag}] clean={summary['metrics']['clean_acc']:.4f} | "
-            f"attacked={summary['metrics']['attacked_acc']:.4f} | "
-            f"defended={summary['metrics']['defended_acc']:.4f} "
-            f"(saved: {pt_path})"
+            f"[{tag}] clean={summary['metrics']['clean_micro_acc']:.4f} | "
+            f"attacked={summary['metrics']['attacked_micro_acc']:.4f} | "
+            f"defended={summary['metrics']['defended_micro_acc']:.4f} "
+            f"(saved to {out_dir})"
         )
 
         return summary
