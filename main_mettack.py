@@ -33,7 +33,7 @@ except ImportError:
 
 # ===================== 2. 全局配置 =====================
 SEED = 15
-SHARE_PERTURBATIONS = 0.05  # 扰动边的比例
+SHARE_PERTURBATIONS = 0.15  # 扰动边的比例
 DTYPE = tf.float32  # 内存不足可换tf.float16
 ATTACK_VARIANT = "Meta-Self"  # 攻击变体（可选：Meta-Train/Meta-Self/A-Meta-Train等）
 ENFORCE_LL_CONSTRAINT = False
@@ -144,7 +144,7 @@ def main(cfg: DictConfig):
         gpuid = None
     else:
         gpuid = gpu - 1
-    metattacker = Metattacker(datamodule,share_perturbations=SHARE_PERTURBATIONS,classifier=None,re_trainings=5,device=gpuid,train_iters = 200)
+    metattacker = Metattacker(datamodule,share_perturbations=SHARE_PERTURBATIONS,re_trainings=5,device=gpuid,train_iters = 200)
     accuracies_clean, accuracies_atk = metattacker.poison()
     # 打印关键结果
     print(f"Clean Accuracy (mean±std): {np.mean(accuracies_clean):.4f} ± {np.std(accuracies_clean):.4f}")

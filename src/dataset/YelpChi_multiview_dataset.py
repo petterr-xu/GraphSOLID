@@ -120,8 +120,8 @@ class YelpChiHeteroDataset(Dataset):
         return set(np.unique(sub_labels)) == set(np.unique(orig_labels))
     
     def HGT_partitioning(self):
-        self.num_hops = 2
-        self.fanout = 20
+        self.num_hops = 3
+        self.fanout = 40
         hetero = self.original_data
         target_type = self.target_node_type
 

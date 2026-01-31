@@ -1,3 +1,4 @@
+import torch
 import numpy as np
 from tqdm import tqdm
 import tensorflow as tf
@@ -20,8 +21,8 @@ mtk.tqdm = quiet_tqdm
 class Attacker():
     def __init__(self, dataset_module:AbstractDataModule):
         self.dataset_module = dataset_module
-    def attack(self):
-        pass
+    def attack(self,data):
+        return data
 
 class Metattacker(Attacker):
     def __init__(self, dataset_module:AbstractDataModule, share_perturbations, attack_varient='Meta-Self', re_trainings=5, device=0, train_iters = 200):
@@ -34,8 +35,122 @@ class Metattacker(Attacker):
         self.ENFORCE_LL_CONSTRAINT = False
         self.attack_variant = attack_varient
 
-    def attack(self,data):
-        return data
+    def attack(self, data):
+        """
+        Run MetaAttack on a single (sub)graph and return the attacked graph in PyG format.
+
+        Notes:
+        - MetaAttack implementation here only supports homogeneous graphs.
+        - If `data` is a `HeteroData`, we first convert it to homogeneous via `to_homogeneous()`,
+          run the attack, and then restore it back to `HeteroData` via `to_heterogeneous()`.
+        - The returned object will be `Data` for homogeneous inputs, and `HeteroData` for heterogeneous inputs.
+        """
+        is_hetero = isinstance(data, HeteroData)
+
+        # 1) Convert to homogeneous if needed (MetaAttack only supports homogeneous graphs)
+        if is_hetero:
+            homo = data.to_homogeneous()
+        else:
+            homo = data
+
+        # 2) Build matrices for MetaAttack
+        _A_obs, _X_obs, _z_obs, _Z_obs, _N, _K, data_mask = graphbuilder.pyg2matrix(homo)
+        split_train, split_val, split_unlabeled = graphbuilder.split_dataset_by_pyg_mask(data_mask)
+
+        # 3) Run meta attack (only structure perturbation here)
+        modified_adjacency = self._run_meta_attack_on_single_graph(
+            _A_obs, _X_obs, _Z_obs, _N, _K, split_train, split_unlabeled, attack_variant=self.attack_variant
+        )
+
+        # 4) Convert attacked adjacency back to edge_index
+        if sp.issparse(modified_adjacency):
+            modified_adjacency = modified_adjacency.tocoo()
+            rows = modified_adjacency.row
+            cols = modified_adjacency.col
+        else:
+            rows, cols = np.nonzero(modified_adjacency)
+
+        # Remove self-loops (optional but usually desired for GCN-style datasets)
+        keep = rows != cols
+        rows = rows[keep]
+        cols = cols[keep]
+
+        edge_index = torch.tensor(np.vstack([rows, cols]), dtype=torch.long)
+
+        # 5) Create attacked homogeneous Data (preserve features/labels/masks)
+        attacked_homo = Data()
+        # Preserve node-level tensors
+        if hasattr(homo, "x") and homo.x is not None:
+            attacked_homo.x = homo.x
+        if hasattr(homo, "y") and homo.y is not None:
+            attacked_homo.y = homo.y
+        for mask_name in ["train_mask", "val_mask", "test_mask"]:
+            if hasattr(homo, mask_name):
+                setattr(attacked_homo, mask_name, getattr(homo, mask_name))
+
+        attacked_homo.edge_index = edge_index
+        attacked_homo.num_nodes = homo.num_nodes
+
+        # Preserve any additional attributes that are safe and useful (e.g., node_type/edge_type for hetero restore)
+        for attr in ["node_type", "edge_type"]:
+            if hasattr(homo, attr):
+                setattr(attacked_homo, attr, getattr(homo, attr))
+
+        # Preserve to_homogeneous metadata for restoring hetero graphs
+        for attr in ["_node_type_names", "_edge_type_names"]:
+            if hasattr(homo, attr):
+                setattr(attacked_homo, attr, getattr(homo, attr))
+
+        # If we changed edges, edge_type needs to match number of edges for hetero restoration.
+        # For the common case where the original hetero graph is effectively single-relation,
+        # we assign all edges to relation 0.
+        if is_hetero and hasattr(attacked_homo, "edge_type"):
+            if attacked_homo.edge_type is None or attacked_homo.edge_type.numel() != attacked_homo.edge_index.size(1):
+                attacked_homo.edge_type = torch.zeros(attacked_homo.edge_index.size(1), dtype=torch.long)
+
+        # 6) Restore to hetero if needed
+        if is_hetero:
+            # Requirement: for multi-relation hetero graphs, any add/remove of an edge in the
+            # homogeneous graph should be mirrored across *all* relations that share the same
+            # (src_node_type, dst_node_type) pair.
+            try:
+                # Build global->local node index mapping for each node type
+                node_type = attacked_homo.node_type  # [num_nodes] long
+                node_types, edge_types = data.metadata()
+
+                # local_index[t] gives local node index within its type for every global node
+                local_index = torch.empty(attacked_homo.num_nodes, dtype=torch.long, device=attacked_homo.edge_index.device)
+                for tid, ntype in enumerate(node_types):
+                    idx = (node_type == tid).nonzero(as_tuple=False).view(-1)
+                    local_index[idx] = torch.arange(idx.numel(), device=local_index.device, dtype=torch.long)
+
+                # Group attacked edges by (src_tid, dst_tid)
+                src_g, dst_g = attacked_homo.edge_index[0], attacked_homo.edge_index[1]
+                src_tid = node_type[src_g]
+                dst_tid = node_type[dst_g]
+
+                # We'll construct a fresh hetero graph by cloning original data (keeps node attrs)
+                attacked_hetero = data.clone()
+
+                # For each type-pair, compute the shared edge_index (local indices)
+                # then assign it to every relation with that type-pair.
+                for (src_ntype, rel, dst_ntype) in edge_types:
+                    s_tid = node_types.index(src_ntype)
+                    d_tid = node_types.index(dst_ntype)
+
+                    m = (src_tid == s_tid) & (dst_tid == d_tid)
+                    e_src_local = local_index[src_g[m]]
+                    e_dst_local = local_index[dst_g[m]]
+                    shared_edge_index = torch.stack([e_src_local, e_dst_local], dim=0)
+
+                    attacked_hetero[(src_ntype, rel, dst_ntype)].edge_index = shared_edge_index
+
+                return attacked_hetero
+            except Exception:
+                # Fallback: if anything goes wrong, return homogeneous attacked graph
+                return attacked_homo
+
+        return attacked_homo
 
     def poison(self):
         """
@@ -71,8 +186,8 @@ class Metattacker(Attacker):
                 _A_obs, modified_adjacency, _X_obs, _Z_obs, _z_obs, split_train, split_unlabeled
             )
 
-            all_accuracies_clean.extend(accuracies_clean)
-            all_accuracies_atk.extend(accuracies_atk)
+            all_accuracies_clean.append(np.mean(accuracies_clean))
+            all_accuracies_atk.append(np.mean(accuracies_atk))
 
             curr_clean_avg = np.mean(accuracies_clean)
             curr_atk_avg = np.mean(accuracies_atk)
