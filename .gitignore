@@ -6,3 +6,4 @@ __pycache__/
 ckpt/
 history_data/
 torch_geo/
+*.log
