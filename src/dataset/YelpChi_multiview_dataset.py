@@ -121,7 +121,7 @@ class YelpChiHeteroDataset(Dataset):
     
     def HGT_partitioning(self):
         self.num_hops = 3
-        self.fanout = 40
+        self.fanout = 5
         hetero = self.original_data
         target_type = self.target_node_type
 
@@ -130,11 +130,11 @@ class YelpChiHeteroDataset(Dataset):
         target_nodes = target_nodes[perm]
 
         # seed_nodes = target_nodes[:self.num_parts]
-
+        # growth = 2
         num_samples = {
-            ntype: [self.fanout] * self.num_hops
-            for ntype in hetero.node_types
-        }
+                ntype: [self.fanout ** (i+1) for i in range(self.num_hops)]
+                for ntype in hetero.node_types
+            }
 
         loader = HGTLoader(
             data=hetero,
