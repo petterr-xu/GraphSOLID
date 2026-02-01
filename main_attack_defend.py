@@ -1,4 +1,5 @@
 import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import torch
 import hydra
 import warnings
@@ -13,7 +14,7 @@ from matplotlib import pyplot as plt
 
 from src import loss_fn
 from src.models import HeteroNN
-from src.attack.attack import Metattacker
+from src.attack.attack import Metattacker, RandomAttacker
 from src.attack.pipeline import DefaultPipeline
 from src.attack.defend import DiffusionPurifyDefender
 from src.utils import VNG_utils, graphbuilder
@@ -23,10 +24,7 @@ from src.gnn_meta_attack.metattack import utils as metattack_utils
 from src.gnn_meta_attack.metattack import meta_gradient_attack as mtk
 from src.DiGress.src import utils as digress_utils
 from src.DiGress.src.diffusion_model_discrete import DiscreteDenoisingDiffusion 
-# 1. 屏蔽 TensorFlow C++ 层面的日志 (3 = 仅致命错误)
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
-# 2. 屏蔽 Python 库级别的所有警告 (如 Scipy, Numpy 的弃用警告)
-warnings.filterwarnings("ignore")
+tf.get_logger().setLevel("ERROR")
 # 禁用TF Eager Execution（原代码要求）
 tf.compat.v1.disable_eager_execution()
 try:
@@ -136,7 +134,12 @@ def main(cfg: DictConfig):
     model = model.to(device)
     target = cfg.dataset.target
     nclass = hetero_data.n_classes
-    metattacker = Metattacker(datamodule,share_perturbations=SHARE_PERTURBATIONS,re_trainings=5,device=gpuid,train_iters = 200)
+    if cfg.general.attack_method == 'metattack':
+        attacker = Metattacker(datamodule,perturb_ratio=cfg.general.perturb_ratio,re_trainings=5,device=gpuid,train_iters = 200)
+    elif cfg.general.attack_method == 'random':
+        attacker = RandomAttacker(datamodule, perturb_ratio=cfg.general.perturb_ratio)
+    else:
+        raise NotImplementedError("Unknown attack method {}".format(cfg.general.attack_method))
     diffusionDefender = DiffusionPurifyDefender(diffusion_steps=10, diffusion_model=model, metapaths=cfg.dataset.metapaths, target_node_type=cfg.dataset.target)
     print(hetero_data.g.metadata())
     classifier = HeteroNN.HeteroGNN_classifier(net=cfg.general.net, target_node=target, metadata=hetero_data.g.metadata(), nhid=cfg.general.feat_dim, nclass=nclass, nlayer=cfg.general.n_layers, dropout=0.5).to(device)
@@ -150,7 +153,7 @@ def main(cfg: DictConfig):
                                                                 verbose=False)
     pipeline = DefaultPipeline(dataset_module=datamodule, 
                                defender=diffusionDefender, 
-                               attacker=metattacker, 
+                               attacker=attacker, 
                                classifier=classifier, 
                                classifier_optimizer=classifier_optimizer, 
                                classifier_criterion=classifier_criterion, 

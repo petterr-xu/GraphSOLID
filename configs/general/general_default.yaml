@@ -30,3 +30,7 @@ evaluate_all_checkpoints: False
 net: 'HeteroSAGE'
 feat_dim: 64
 n_layers: 2
+
+# attacker settings
+attack_method: 'metattack'    # 'metattack' | 'random'
+perturb_ratio: 0.15

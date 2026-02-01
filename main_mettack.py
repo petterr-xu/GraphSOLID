@@ -144,7 +144,7 @@ def main(cfg: DictConfig):
         gpuid = None
     else:
         gpuid = gpu - 1
-    metattacker = Metattacker(datamodule,share_perturbations=SHARE_PERTURBATIONS,re_trainings=5,device=gpuid,train_iters = 200)
+    metattacker = Metattacker(datamodule,perturb_ratio=SHARE_PERTURBATIONS,re_trainings=5,device=gpuid,train_iters = 200)
     accuracies_clean, accuracies_atk = metattacker.poison()
     # 打印关键结果
     print(f"Clean Accuracy (mean±std): {np.mean(accuracies_clean):.4f} ± {np.std(accuracies_clean):.4f}")

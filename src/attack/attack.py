@@ -267,10 +267,10 @@ class RandomAttacker(Attacker):
         return out
 
 class Metattacker(Attacker):
-    def __init__(self, dataset_module:AbstractDataModule, share_perturbations, attack_varient='Meta-Self', re_trainings=5, device=0, train_iters = 200):
+    def __init__(self, dataset_module:AbstractDataModule, perturb_ratio, attack_varient='Meta-Self', re_trainings=5, device=0, train_iters = 200):
         super().__init__(dataset_module)
         self.GPU_ID = device
-        self.share_perturbations = share_perturbations
+        self.share_perturbations = perturb_ratio
         self.train_iters = train_iters
         self.re_trainings = re_trainings
         self.dtype = tf.float32
@@ -318,7 +318,7 @@ class Metattacker(Attacker):
         rows = rows[keep]
         cols = cols[keep]
 
-        edge_index = torch.tensor(np.vstack([rows, cols]), dtype=torch.long)
+        edge_index = torch.tensor(np.vstack([rows, cols]), dtype=torch.long, device=homo.edge_index.device)
 
         # 5) Create attacked homogeneous Data (preserve features/labels/masks)
         attacked_homo = Data()
