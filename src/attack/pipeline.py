@@ -336,7 +336,7 @@ class DefaultPipeline:
         history: List[Dict[str, float]] = []
         best_val = float("inf")
         bad_epochs = 0
-        for epoch in tqdm(range(epochs), desc=f"Epochs ({split})"):
+        for epoch in tqdm(range(epochs), desc=f"Epochs ({split})", dynamic_ncols=True, leave=True):
             if shuffle:
                 order = torch.randperm(num_samples).tolist()
             else:
@@ -344,7 +344,13 @@ class DefaultPipeline:
 
             train_losses = []
             val_losses = []
-            for i in tqdm(order, desc=f"Training {split} epoch {epoch + 1}/{epochs}", leave=False):
+            for i in tqdm(
+                order,
+                desc=f"Training {split} epoch {epoch + 1}/{epochs}",
+                leave=False,
+                dynamic_ncols=True,
+                position=1,
+            ):
                 data = ds[i]
                 if hasattr(data, "to"):
                     data = data.to(self.device)
@@ -356,7 +362,7 @@ class DefaultPipeline:
             avg_val = float(sum(val_losses) / max(len(val_losses), 1))
             history.append({"epoch": epoch + 1, "train_loss": avg_train, "val_loss": avg_val})
 
-            print(
+            tqdm.write(
                 f"[train_classifier_vanilla] epoch={epoch + 1}/{epochs} | "
                 f"train_loss={avg_train:.6f} | val_loss={avg_val:.6f}"
             )
