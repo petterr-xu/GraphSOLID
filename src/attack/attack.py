@@ -53,6 +53,7 @@ class RandomAttacker(Attacker):
         perturb_ratio: float = 0.05,
         seed: Optional[int] = None,
         allow_self_loops: bool = False,
+        ensure_undirected: bool = True,
         max_sampling_rounds: int = 50,
         oversample_factor: int = 5,
     ):
@@ -61,6 +62,7 @@ class RandomAttacker(Attacker):
         self.perturb_ratio = float(perturb_ratio)
         self.seed = seed
         self.allow_self_loops = allow_self_loops
+        self.ensure_undirected = ensure_undirected
         self.max_sampling_rounds = int(max_sampling_rounds)
         self.oversample_factor = int(oversample_factor)
 
@@ -68,6 +70,21 @@ class RandomAttacker(Attacker):
     def _hash_edges(src: torch.Tensor, dst: torch.Tensor, num_dst: int) -> torch.Tensor:
         # unique id for each directed edge (src, dst)
         return src.to(torch.long) * int(num_dst) + dst.to(torch.long)
+
+    @staticmethod
+    def _hash_undirected(src: torch.Tensor, dst: torch.Tensor, num_nodes: int) -> torch.Tensor:
+        u = torch.minimum(src, dst).to(torch.long)
+        v = torch.maximum(src, dst).to(torch.long)
+        return u * int(num_nodes) + v
+
+    @staticmethod
+    def _looks_undirected(edge_index: torch.Tensor, num_nodes: int) -> bool:
+        if edge_index.numel() == 0:
+            return False
+        src, dst = edge_index[0], edge_index[1]
+        h = RandomAttacker._hash_edges(src, dst, num_nodes)
+        hr = RandomAttacker._hash_edges(dst, src, num_nodes)
+        return bool(torch.isin(hr, h).all().item())
 
     def _sample_new_edges(
         self,
@@ -145,6 +162,85 @@ class RandomAttacker(Attacker):
 
         return new_src, new_dst
 
+    def _sample_new_undirected_pairs(
+        self,
+        num_nodes: int,
+        k: int,
+        existing_hash: torch.Tensor,
+        device: torch.device,
+        forbid_self_loops: bool,
+        generator: Optional[torch.Generator],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Sample k undirected pairs (u, v) with u <= v, not in existing_hash.
+        Returns (u, v) each shape [k].
+        """
+        if k <= 0:
+            return (
+                torch.empty(0, dtype=torch.long, device=device),
+                torch.empty(0, dtype=torch.long, device=device),
+            )
+
+        existing = existing_hash
+        new_u_list = []
+        new_v_list = []
+
+        remaining = k
+        for _ in range(self.max_sampling_rounds):
+            if remaining <= 0:
+                break
+
+            m = max(remaining * self.oversample_factor, remaining + 10)
+            cand_u = torch.randint(0, num_nodes, (m,), device=device, generator=generator)
+            cand_v = torch.randint(0, num_nodes, (m,), device=device, generator=generator)
+
+            if forbid_self_loops:
+                mask = cand_u != cand_v
+                cand_u, cand_v = cand_u[mask], cand_v[mask]
+                if cand_u.numel() == 0:
+                    continue
+
+            u = torch.minimum(cand_u, cand_v)
+            v = torch.maximum(cand_u, cand_v)
+            cand_hash = self._hash_undirected(u, v, num_nodes)
+
+            keep = ~torch.isin(cand_hash, existing)
+            u, v, cand_hash = u[keep], v[keep], cand_hash[keep]
+            if u.numel() == 0:
+                continue
+
+            cand_hash, uniq_idx = torch.unique(
+                cand_hash, return_inverse=False, return_counts=False, sorted=False, return_index=True
+            )
+            u = u[uniq_idx]
+            v = v[uniq_idx]
+
+            take = min(remaining, u.numel())
+            if take <= 0:
+                continue
+
+            new_u_list.append(u[:take])
+            new_v_list.append(v[:take])
+
+            taken_hash = self._hash_undirected(u[:take], v[:take], num_nodes)
+            existing = torch.cat([existing, taken_hash], dim=0)
+            remaining -= take
+
+        if len(new_u_list) == 0:
+            return (
+                torch.empty(0, dtype=torch.long, device=device),
+                torch.empty(0, dtype=torch.long, device=device),
+            )
+
+        new_u = torch.cat(new_u_list, dim=0)
+        new_v = torch.cat(new_v_list, dim=0)
+
+        if new_u.numel() > k:
+            new_u = new_u[:k]
+            new_v = new_v[:k]
+
+        return new_u, new_v
+
     def _perturb_edge_index(
         self,
         edge_index: torch.Tensor,
@@ -163,6 +259,83 @@ class RandomAttacker(Attacker):
 
         if E == 0 or k == 0:
             return edge_index, edge_attr
+
+        # For undirected graphs stored as symmetric edge_index (src_type == dst_type),
+        # perturb in pairs so we don't break symmetry.
+        if (
+            self.ensure_undirected
+            and num_src == num_dst
+            and self._looks_undirected(edge_index, num_src)
+        ):
+            num_nodes = num_src
+            src, dst = edge_index[0], edge_index[1]
+            undir_hash = self._hash_undirected(src, dst, num_nodes)
+            uniq_hash, uniq_idx = torch.unique(
+                undir_hash, return_inverse=False, return_counts=False, sorted=False, return_index=True
+            )
+            num_undir = int(uniq_hash.numel())
+            k_undir = int(self.perturb_ratio * num_undir)
+            if num_undir == 0 or k_undir == 0:
+                return edge_index, edge_attr
+
+            perm = torch.randperm(num_undir, device=device, generator=generator)
+            del_undir_hash = uniq_hash[perm[:k_undir]]
+
+            # remove both directions for deleted undirected pairs
+            undir_all = self._hash_undirected(src, dst, num_nodes)
+            keep_mask = ~torch.isin(undir_all, del_undir_hash)
+
+            kept_edge_index = edge_index[:, keep_mask]
+            kept_edge_attr = None
+            if edge_attr is not None:
+                kept_edge_attr = edge_attr[keep_mask]
+
+            # sample new undirected pairs
+            existing_hash = self._hash_undirected(
+                kept_edge_index[0], kept_edge_index[1], num_nodes
+            )
+            new_u, new_v = self._sample_new_undirected_pairs(
+                num_nodes=num_nodes,
+                k=k_undir,
+                existing_hash=existing_hash,
+                device=device,
+                forbid_self_loops=forbid_self_loops,
+                generator=generator,
+            )
+
+            if new_u.numel() == 0:
+                return kept_edge_index, kept_edge_attr
+
+            # expand to directed edges
+            if forbid_self_loops:
+                self_mask = new_u != new_v
+                new_u, new_v = new_u[self_mask], new_v[self_mask]
+
+            rev_u = new_v
+            rev_v = new_u
+            added_edge_index = torch.stack(
+                [torch.cat([new_u, rev_u]), torch.cat([new_v, rev_v])], dim=0
+            )
+            new_edge_index = torch.cat([kept_edge_index, added_edge_index], dim=1)
+
+            new_edge_attr = kept_edge_attr
+            if edge_attr is not None:
+                if edge_attr.dim() >= 2:
+                    feat_dim = edge_attr.size(-1)
+                    added_attr = torch.zeros(
+                        (added_edge_index.size(1), feat_dim),
+                        device=device,
+                        dtype=edge_attr.dtype,
+                    )
+                else:
+                    added_attr = torch.zeros(
+                        (added_edge_index.size(1),),
+                        device=device,
+                        dtype=edge_attr.dtype,
+                    )
+                new_edge_attr = torch.cat([kept_edge_attr, added_attr], dim=0)
+
+            return new_edge_index, new_edge_attr
 
         # 1) random delete k edges
         perm = torch.randperm(E, device=device, generator=generator)
