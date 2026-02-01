@@ -40,6 +40,7 @@ class DefaultPipeline:
         classifier: nn.Module,
         classifier_optimizer: torch.optim.Optimizer,
         classifier_criterion,
+        cl_scheduler,
         target,
         device = 'cuda:0',
         cl_lr: float = 0.001,
@@ -52,6 +53,7 @@ class DefaultPipeline:
         self.target = target
         self.classifier_optimizer = classifier_optimizer
         self.classifier_criterion = classifier_criterion
+        self.cl_scheduler = cl_scheduler
         self._to_device(device)
 
     def _to_device(self, device):
@@ -294,7 +296,7 @@ class DefaultPipeline:
 
             train_losses = []
             val_losses = []
-            for i in tqdm(order, desc=f"Training {split} epoch {epoch + 1}/{epochs}"):
+            for i in tqdm(order, desc=f"Training {split} epoch {epoch + 1}/{epochs}", leave=False):
                 data = ds[i]
                 if hasattr(data, "to"):
                     data = data.to(self.device)
@@ -357,6 +359,7 @@ class DefaultPipeline:
         clean = self._eval_over_dataset(
             dataset=ds, split=split, target_type=target_type, transform_fn=None, desc="clean"
         )
+        print(f"[defend_after_attack] Clean micro-accuracy: {clean['micro_acc']:.4f} \n ")
 
         # 2) attacked
         attacked = self._eval_over_dataset(
