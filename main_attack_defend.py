@@ -11,7 +11,8 @@ from args import parse_args
 from omegaconf import DictConfig
 from matplotlib import pyplot as plt
 
-
+from src import loss_fn
+from src.models import HeteroNN
 from src.attack.attack import Metattacker
 from src.attack.pipeline import DefaultPipeline
 from src.attack.defend import DiffusionPurifyDefender
@@ -133,9 +134,23 @@ def main(cfg: DictConfig):
         gpuid = gpu - 1
         device = f'cuda:{gpuid}'
     model = model.to(device)
+    target = cfg.dataset.target
+    nclass = hetero_data.n_classes
     metattacker = Metattacker(datamodule,share_perturbations=SHARE_PERTURBATIONS,re_trainings=5,device=gpuid,train_iters = 200)
-    diffusionDefender = DiffusionPurifyDefender(diffusion_steps=10, diffusion_model=model, metapaths= cfg.dataset.metapaths, target_node_type=cfg.dataset.target)
-    pipeline = DefaultPipeline(dataset_module=datamodule, defender=diffusionDefender, attacker=metattacker, classifier=model, device=device)
+    diffusionDefender = DiffusionPurifyDefender(diffusion_steps=10, diffusion_model=model, metapaths=cfg.dataset.metapaths, target_node_type=cfg.dataset.target)
+    classifier = HeteroNN.HeteroGNN_classifier(net=cfg.general.net, target_node=target, metadata=cfg.dataset.metapaths, nhid=cfg.general.feat_dim, nclass=nclass, nlayer=cfg.general.n_layers, dropout=0.5).to(device)
+    classifier_optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-3)
+    train_mask = hetero_data.g[target].train_mask
+    class_count = torch.bincount(hetero_data.g[target].y[train_mask].view(-1), minlength=nclass).to(device,torch.float)
+    classifier_criterion = loss_fn.IMB_LOSS("ce",nclass,class_count.detach().cpu().numpy(),device=device)
+    pipeline = DefaultPipeline(dataset_module=datamodule, 
+                               defender=diffusionDefender, 
+                               attacker=metattacker, 
+                               classifier=classifier, 
+                               classifier_optimizer=classifier_optimizer, 
+                               classifier_criterion=classifier_criterion, 
+                               target=cfg.dataset.target, 
+                               device=device)
     result = pipeline.defend_after_attack(split='test')
     print("Final Results after defense and attack:\n", result)
 

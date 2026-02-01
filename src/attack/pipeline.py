@@ -10,6 +10,7 @@ import torch.nn as nn
 from .attack import Attacker
 from .defend import Defender
 from src.dataset.abstract_dataset import AbstractDataModule
+from src import loss_fn
 
 
 class DefaultPipeline:
@@ -37,13 +38,20 @@ class DefaultPipeline:
         defender: Defender,
         attacker: Attacker,
         classifier: nn.Module,
-        device
+        classifier_optimizer: torch.optim.Optimizer,
+        classifier_criterion,
+        target,
+        device = 'cuda:0',
+        cl_lr: float = 0.001,
     ):
         self.dataset_module = dataset_module
         self.defender = defender
         self.attacker = attacker
         self.classifier = classifier
         self.device = device
+        self.target = target
+        self.classifier_optimizer = classifier_optimizer
+        self.classifier_criterion = classifier_criterion
         self._to_device(device)
 
     def _to_device(self, device):
@@ -223,6 +231,35 @@ class DefaultPipeline:
             "total_correct": int(total_correct),
             "per_sample": per_sample,
         }
+    
+    def train_classifier_vanilla_oneloop(self, data, weights=None):
+        device = self.device
+        target = self.target
+        
+        self.classifier.train()
+        self.classifier_optimizer.zero_grad()
+        
+        # 调用 HeteroGNN_classifier，传入字典格式的数据
+        logits = self.classifier(data.x_dict, data.edge_index_dict)
+        
+        # 提取目标节点的标签和掩码
+        labels = data[target].y
+        train_mask = data[target].train_mask
+        val_mask = data[target].val_mask
+        
+        # 计算训练损失
+        loss = self.classifier_criterion.compute(logits[train_mask], labels[train_mask])
+        loss.backward()
+        self.classifier_optimizer.step()
+
+        # 验证步骤
+        with torch.no_grad():
+            self.classifier.eval()
+            output = self.classifier(data.x_dict, data.edge_index_dict)
+            val_loss = self.classifier_criterion.compute(output[val_mask], labels[val_mask])
+        self.classifier_optimizer.step()
+        self.cl_scheduler.step(val_loss)
+        return loss.item(), val_loss.item()
 
     # -----------------------------
     # Main API
