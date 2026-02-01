@@ -18,6 +18,9 @@ class Defender():
 
     def defend(self, data):
         raise NotImplementedError
+    
+    def to(self, device):
+        raise NotImplementedError
 
 
 class DiffusionPurifyDefender(Defender):
@@ -43,6 +46,9 @@ class DiffusionPurifyDefender(Defender):
     # ----------------------------
     # Public API
     # ----------------------------
+    def to(self, device):
+        self.diffusion_model.to(device)
+        return self
     def defend(
         self,
         data: HeteroData,

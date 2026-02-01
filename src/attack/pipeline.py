@@ -1,5 +1,6 @@
 import os
 import json
+from tqdm import tqdm
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -36,11 +37,21 @@ class DefaultPipeline:
         defender: Defender,
         attacker: Attacker,
         classifier: nn.Module,
+        device
     ):
         self.dataset_module = dataset_module
         self.defender = defender
         self.attacker = attacker
         self.classifier = classifier
+        self.device = device
+        self._to_device(device)
+
+    def _to_device(self, device):
+        if device is None:
+            raise ValueError("Device must be specified.")
+        self.classifier.to(device)
+        self.defender.to(device)
+
 
     def attack_onely(self):
         raise NotImplementedError
@@ -55,15 +66,8 @@ class DefaultPipeline:
                 raise KeyError(f"dataset_module.hetero_datasets has no split '{split}'.")
             return dm.hetero_datasets[split]
 
-        # fallback (older style) - try dm.<split>_dataset
-        for attr in [f"{split}_dataset", f"{split}_data", f"{split}_graph"]:
-            if hasattr(dm, attr):
-                ds = getattr(dm, attr)
-                if ds is not None:
-                    return ds
-
         raise AttributeError(
-            "Cannot locate split dataset. Expected dataset_module.hetero_datasets[split] or dataset_module.<split>_dataset."
+            "Cannot locate split dataset. Expected dataset_module.hetero_datasets[split]"
         )
 
     def _infer_target_type(self, sample_graph) -> str:
@@ -186,7 +190,7 @@ class DefaultPipeline:
         per_sample: List[Dict[str, Any]] = []
 
         # Deterministic order; dataset is already a processed on-disk dataset.
-        for i in range(len(dataset)):
+        for i in tqdm(range(len(dataset)), desc=f"Evaluating {desc}"):
             g = dataset[i]
             if transform_fn is not None:
                 # clone to avoid writing back into cached dataset items

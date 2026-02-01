@@ -22,6 +22,8 @@ mtk.tqdm = quiet_tqdm
 class Attacker():
     def __init__(self, dataset_module:AbstractDataModule):
         self.dataset_module = dataset_module
+    def to(self,device):
+        return self
     def attack(self,data):
         return data
 
