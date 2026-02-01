@@ -1,4 +1,5 @@
 import torch
+import warnings
 import numpy as np
 from tqdm import tqdm
 import tensorflow as tf
@@ -215,6 +216,7 @@ class RandomAttacker(Attacker):
 
         # Homogeneous graph case
         if isinstance(data, Data):
+            warnings.warn("RandomAttacker works best with HeteroData. Proceeding with Data (homogeneous graph).")
             out = data.clone()
             num_nodes = out.num_nodes
             forbid_self_loops = (not self.allow_self_loops)
@@ -233,7 +235,7 @@ class RandomAttacker(Attacker):
 
         # Heterogeneous graph case (recommended)
         if not isinstance(data, HeteroData):
-            return data
+            raise RuntimeError("Expected `data` to be `Data` or `HeteroData`.")
 
         out = data.clone()
 
@@ -291,6 +293,7 @@ class Metattacker(Attacker):
         if is_hetero:
             homo = data.to_homogeneous()
         else:
+            warnings.warn("Metattacker works best with HeteroData. Proceeding with Data (homogeneous graph).")
             homo = data
 
         # 2) Build matrices for MetaAttack
@@ -353,42 +356,40 @@ class Metattacker(Attacker):
             # Requirement: for multi-relation hetero graphs, any add/remove of an edge in the
             # homogeneous graph should be mirrored across *all* relations that share the same
             # (src_node_type, dst_node_type) pair.
-            try:
-                # Build global->local node index mapping for each node type
-                node_type = attacked_homo.node_type  # [num_nodes] long
-                node_types, edge_types = data.metadata()
+            # Build global->local node index mapping for each node type
+            node_type = attacked_homo.node_type  # [num_nodes] long
+            node_types, edge_types = data.metadata()
 
-                # local_index[t] gives local node index within its type for every global node
-                local_index = torch.empty(attacked_homo.num_nodes, dtype=torch.long, device=attacked_homo.edge_index.device)
-                for tid, ntype in enumerate(node_types):
-                    idx = (node_type == tid).nonzero(as_tuple=False).view(-1)
-                    local_index[idx] = torch.arange(idx.numel(), device=local_index.device, dtype=torch.long)
+            # local_index[t] gives local node index within its type for every global node
+            local_index = torch.empty(attacked_homo.num_nodes, dtype=torch.long, device=attacked_homo.edge_index.device)
+            for tid, ntype in enumerate(node_types):
+                idx = (node_type == tid).nonzero(as_tuple=False).view(-1)
+                local_index[idx] = torch.arange(idx.numel(), device=local_index.device, dtype=torch.long)
 
-                # Group attacked edges by (src_tid, dst_tid)
-                src_g, dst_g = attacked_homo.edge_index[0], attacked_homo.edge_index[1]
-                src_tid = node_type[src_g]
-                dst_tid = node_type[dst_g]
+            # Group attacked edges by (src_tid, dst_tid)
+            src_g, dst_g = attacked_homo.edge_index[0], attacked_homo.edge_index[1]
+            src_tid = node_type[src_g]
+            dst_tid = node_type[dst_g]
 
-                # We'll construct a fresh hetero graph by cloning original data (keeps node attrs)
-                attacked_hetero = data.clone()
+            # We'll construct a fresh hetero graph by cloning original data (keeps node attrs)
+            attacked_hetero = data.clone()
 
-                # For each type-pair, compute the shared edge_index (local indices)
-                # then assign it to every relation with that type-pair.
-                for (src_ntype, rel, dst_ntype) in edge_types:
-                    s_tid = node_types.index(src_ntype)
-                    d_tid = node_types.index(dst_ntype)
+            # For each type-pair, compute the shared edge_index (local indices)
+            # then assign it to every relation with that type-pair.
+            for (src_ntype, rel, dst_ntype) in edge_types:
+                s_tid = node_types.index(src_ntype)
+                d_tid = node_types.index(dst_ntype)
 
-                    m = (src_tid == s_tid) & (dst_tid == d_tid)
-                    e_src_local = local_index[src_g[m]]
-                    e_dst_local = local_index[dst_g[m]]
-                    shared_edge_index = torch.stack([e_src_local, e_dst_local], dim=0)
+                m = (src_tid == s_tid) & (dst_tid == d_tid)
+                e_src_local = local_index[src_g[m]]
+                e_dst_local = local_index[dst_g[m]]
+                shared_edge_index = torch.stack([e_src_local, e_dst_local], dim=0)
 
-                    attacked_hetero[(src_ntype, rel, dst_ntype)].edge_index = shared_edge_index
+                attacked_hetero[(src_ntype, rel, dst_ntype)].edge_index = shared_edge_index
 
-                return attacked_hetero
-            except Exception:
-                # Fallback: if anything goes wrong, return homogeneous attacked graph
-                return attacked_homo
+            return attacked_hetero
+        else:
+            warnings.warn("Returning attacked graph as Data (homogeneous graph).")
 
         return attacked_homo
 

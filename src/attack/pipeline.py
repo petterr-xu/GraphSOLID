@@ -1,5 +1,6 @@
 import os
 import json
+import warnings
 from tqdm import tqdm
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -149,6 +150,7 @@ class DefaultPipeline:
             y = g[target_type].y
             mask = getattr(g[target_type], f"{split}_mask")
         else:
+            warnings.warn("Graph does not have x_dict and edge_index_dict attributes. Assuming homogeneous graph.")
             # homogeneous fallback
             logits = self.classifier(g)
             y = g.y
