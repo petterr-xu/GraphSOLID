@@ -4,6 +4,7 @@ from typing import Any, List, Sequence, Tuple, Union, Optional
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data, HeteroData
+from torch_geometric.utils import to_undirected
 
 try:
     # If your project provides it, prefer the exact same extraction logic as the dataset.
@@ -124,6 +125,15 @@ class DiffusionPurifyDefender(Defender):
     @staticmethod
     def _preprocess_view_for_diffusion(view: Data, v_idx: int, num_views: int) -> Data:
         """Mirror YelpChiMultiviewDataset.process preprocessing so the diffusion model can compute correctly."""
+        # Ensure undirected edge_index for diffusion (expects symmetric adjacency)
+        if view.edge_index is not None and view.edge_index.numel() > 0:
+            src, dst = view.edge_index[0], view.edge_index[1]
+            num_nodes = view.num_nodes
+            h = src.to(torch.long) * int(num_nodes) + dst.to(torch.long)
+            hr = dst.to(torch.long) * int(num_nodes) + src.to(torch.long)
+            if not bool(torch.isin(hr, h).all().item()):
+                view.edge_index = to_undirected(view.edge_index, num_nodes=num_nodes)
+
         # Node features: set as one-hot of node labels if available (YelpChi uses binary node labels).
         if hasattr(view, 'y') and view.y is not None:
             try:
