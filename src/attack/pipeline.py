@@ -260,11 +260,76 @@ class DefaultPipeline:
         self.classifier_optimizer.step()
         self.cl_scheduler.step(val_loss)
         return loss.item(), val_loss.item()
+    
+    def train_classifier_vanilla(
+        self,
+        split: str = "train",
+        epochs: int = 100,
+        shuffle: bool = False,
+        early_stop_patience: int = 10,
+        early_stop_min_delta: float = 0.001,
+    ) -> List[Dict[str, float]]:
+        """
+        Train classifier over the full split dataset for N epochs.
+        Returns per-epoch average train/val losses.
+        """
+        ds = self._get_split_dataset(split)
+        if not (hasattr(ds, "__len__") and hasattr(ds, "__getitem__")):
+            ds = [ds]
+        elif hasattr(ds, "x_dict") or hasattr(ds, "edge_index_dict") or hasattr(ds, "x"):
+            ds = [ds]
+
+        num_samples = len(ds)
+        if num_samples == 0:
+            raise ValueError(f"Empty dataset for split='{split}'.")
+
+        history: List[Dict[str, float]] = []
+        best_val = float("inf")
+        bad_epochs = 0
+        for epoch in tqdm(range(epochs), desc=f"Epochs ({split})"):
+            if shuffle:
+                order = torch.randperm(num_samples).tolist()
+            else:
+                order = list(range(num_samples))
+
+            train_losses = []
+            val_losses = []
+            for i in tqdm(order, desc=f"Training {split} epoch {epoch + 1}/{epochs}"):
+                data = ds[i]
+                if hasattr(data, "to"):
+                    data = data.to(self.device)
+                train_loss, val_loss = self.train_classifier_vanilla_oneloop(data)
+                train_losses.append(train_loss)
+                val_losses.append(val_loss)
+
+            avg_train = float(sum(train_losses) / max(len(train_losses), 1))
+            avg_val = float(sum(val_losses) / max(len(val_losses), 1))
+            history.append({"epoch": epoch + 1, "train_loss": avg_train, "val_loss": avg_val})
+
+            print(
+                f"[train_classifier_vanilla] epoch={epoch + 1}/{epochs} | "
+                f"train_loss={avg_train:.6f} | val_loss={avg_val:.6f}"
+            )
+
+            if early_stop_patience and early_stop_patience > 0:
+                if (best_val - avg_val) > early_stop_min_delta:
+                    best_val = avg_val
+                    bad_epochs = 0
+                else:
+                    bad_epochs += 1
+                    if bad_epochs >= early_stop_patience:
+                        print(
+                            f"[train_classifier_vanilla] early stop at epoch {epoch + 1} "
+                            f"(best_val={best_val:.6f}, patience={early_stop_patience})"
+                        )
+                        break
+
+        return history
 
     # -----------------------------
     # Main API
     # -----------------------------
-    def defend_after_attack(self, split: str = "test") -> Dict[str, Any]:
+    def defend_after_attack(self, split: str = "test", need_training: bool = True) -> Dict[str, Any]:
         """
         Evaluate classifier on clean / attacked / defended versions of the hetero subgraph dataset.
 
@@ -277,6 +342,9 @@ class DefaultPipeline:
           - {split}_defend_after_attack_results.pt  (full tensors)
           - {split}_defend_after_attack_metrics.json (metrics only)
         """
+        if need_training:
+            print(f"[defend_after_attack] Training classifier on {split} split before evaluation...")
+            self.train_classifier_vanilla()
         ds = self._get_split_dataset(split)
 
         # infer target type from first sample
