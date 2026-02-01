@@ -219,11 +219,18 @@ class RandomAttacker(Attacker):
             if u.numel() == 0:
                 continue
 
-            cand_hash, uniq_idx = torch.unique(
-                cand_hash, return_inverse=False, return_counts=False, sorted=False, return_index=True
-            )
-            u = u[uniq_idx]
-            v = v[uniq_idx]
+            # Deduplicate candidates themselves (compatible with older torch: no return_index)
+            order = torch.argsort(cand_hash)
+            cand_hash = cand_hash[order]
+            u = u[order]
+            v = v[order]
+
+            keep2 = torch.ones(cand_hash.size(0), dtype=torch.bool, device=cand_hash.device)
+            keep2[1:] = cand_hash[1:] != cand_hash[:-1]
+
+            cand_hash = cand_hash[keep2]
+            u = u[keep2]
+            v = v[keep2]
 
             take = min(remaining, u.numel())
             if take <= 0:
@@ -280,9 +287,12 @@ class RandomAttacker(Attacker):
             num_nodes = num_src
             src, dst = edge_index[0], edge_index[1]
             undir_hash = self._hash_undirected(src, dst, num_nodes)
-            uniq_hash, uniq_idx = torch.unique(
-                undir_hash, return_inverse=False, return_counts=False, sorted=False, return_index=True
-            )
+            # Deduplicate undirected pairs (compatible with older torch: no return_index)
+            order = torch.argsort(undir_hash)
+            undir_hash = undir_hash[order]
+            uniq_idx = torch.ones(undir_hash.size(0), dtype=torch.bool, device=undir_hash.device)
+            uniq_idx[1:] = undir_hash[1:] != undir_hash[:-1]
+            uniq_hash = undir_hash[uniq_idx]
             num_undir = int(uniq_hash.numel())
             k_undir = int(self.perturb_ratio * num_undir)
             if num_undir == 0 or k_undir == 0:
