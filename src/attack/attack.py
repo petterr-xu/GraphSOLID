@@ -131,10 +131,20 @@ class RandomAttacker(Attacker):
             if cand_src.numel() == 0:
                 continue
 
-            # Deduplicate candidates themselves
-            cand_hash, uniq_idx = torch.unique(cand_hash, return_inverse=False, return_counts=False, sorted=False, return_index=True)
-            cand_src = cand_src[uniq_idx]
-            cand_dst = cand_dst[uniq_idx]
+            # Deduplicate candidates themselves (compatible with older torch: no return_index)
+            # 1) sort by hash
+            order = torch.argsort(cand_hash)
+            cand_hash = cand_hash[order]
+            cand_src  = cand_src[order]
+            cand_dst  = cand_dst[order]
+
+            # 2) keep first occurrence for each unique hash
+            keep2 = torch.ones(cand_hash.size(0), dtype=torch.bool, device=cand_hash.device)
+            keep2[1:] = cand_hash[1:] != cand_hash[:-1]
+
+            cand_hash = cand_hash[keep2]
+            cand_src  = cand_src[keep2]
+            cand_dst  = cand_dst[keep2]
 
             take = min(remaining, cand_src.numel())
             if take <= 0:

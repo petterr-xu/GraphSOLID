@@ -161,7 +161,7 @@ def main(cfg: DictConfig):
                                target=cfg.dataset.target, 
                                device=device)
     result = pipeline.defend_after_attack(split='test')
-    print("Final Results after defense and attack:\n", result)
+    print(result['metrics'])
 
 
 if __name__ == '__main__':

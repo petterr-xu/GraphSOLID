@@ -32,5 +32,5 @@ feat_dim: 64
 n_layers: 2
 
 # attacker settings
-attack_method: 'metattack'    # 'metattack' | 'random'
+attack_method: 'random'    # 'metattack' | 'random'
 perturb_ratio: 0.15
