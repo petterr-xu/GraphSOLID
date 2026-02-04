@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from .attack import Attacker
-from .defend import Defender
+from .attacker import Attacker
+from .defender import Defender
 from src.dataset.abstract_dataset import AbstractDataModule
 from src import loss_fn
 

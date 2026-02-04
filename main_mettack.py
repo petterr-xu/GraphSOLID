@@ -12,7 +12,7 @@ from omegaconf import DictConfig
 from matplotlib import pyplot as plt
 
 
-from src.attack.attack import Metattacker
+from src.attack.attacker import Metattacker
 from src.utils import VNG_utils, graphbuilder
 from src.nettack.nettack import nettack as ntk
 from src.gnn_meta_attack.metattack import utils as metattack_utils

@@ -14,9 +14,9 @@ from matplotlib import pyplot as plt
 
 from src import loss_fn
 from src.models import HeteroNN
-from src.attack.attack import Metattacker, RandomAttacker
+from src.attack.attacker import Metattacker, RandomAttacker
 from src.attack.pipeline import DefaultPipeline
-from src.attack.defend import DiffusionPurifyDefender
+from src.attack.defender import DiffusionPurifyDefender
 from src.utils import VNG_utils, graphbuilder
 from src.nettack.nettack import nettack as ntk
 from src.utils.hetero_dataset_util import GraphDataLoader
