@@ -1,6 +1,10 @@
 import torch
 import warnings
 import numpy as np
+import random
+import copy
+import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 import tensorflow as tf
 import scipy.sparse as sp
@@ -714,6 +718,367 @@ class Metattacker(Attacker):
         # 6. 获取扰动后的邻接矩阵
         modified_adjacency = gcn_attack.modified_adjacency.eval(session=gcn_attack.session)
         return modified_adjacency
+
+
+class MintaAttacker(Attacker):
+    """
+    MintA: Multi-Instance adversarial attack (from MintA demo notebooks).
+
+    Tailored to DNS-style hetero graphs, but will auto-infer the target node type
+    and same-type relations when possible (to better fit current project graphs).
+    relations like:
+      - ('domain_node', 'apex', 'domain_node')
+      - ('domain_node', 'similar', 'domain_node')
+
+    It:
+      1) samples adversarial nodes from malicious test nodes,
+      2) trains a surrogate GCN on a subset of training nodes,
+      3) perturbs features + apex edges among adversarial nodes,
+      4) returns an attacked HeteroData.
+    """
+
+    def __init__(
+        self,
+        dataset_module: AbstractDataModule,
+        perturb_ratio: float = 0.1,
+        adv_nodes_test_size: int = 100,
+        surrogate_train_size: int = 4000,
+        surrogate_hidden: int = 64,
+        surrogate_epochs: int = 50,
+        surrogate_lr: float = 0.01,
+        target_node_type: Optional[str] = None,
+        edge_types_for_A: Optional[list] = None,
+        edge_type_to_perturb: Optional[Tuple[str, str, str]] = None,
+        victim_model: Optional[nn.Module] = None,
+        seed: Optional[int] = None,
+        device: Optional[str] = None,
+    ):
+        super().__init__(dataset_module)
+        self.perturb_ratio = float(perturb_ratio)
+        self.adv_nodes_test_size = int(adv_nodes_test_size)
+        self.surrogate_train_size = int(surrogate_train_size)
+        self.surrogate_hidden = int(surrogate_hidden)
+        self.surrogate_epochs = int(surrogate_epochs)
+        self.surrogate_lr = float(surrogate_lr)
+        self.target_node_type = target_node_type
+        self.edge_types_for_A = edge_types_for_A
+        self.edge_type_to_perturb = edge_type_to_perturb
+        self.victim_model = victim_model
+        self.seed = seed
+        self.device = device
+
+    class _SurrogateGCN(nn.Module):
+        def __init__(self, nfeat: int, nhid: int, nclass: int):
+            super().__init__()
+            # weight shapes: (nfeat, nhid) and (nhid, nclass) to match MintA math
+            self.gc1 = nn.Parameter(torch.empty(nfeat, nhid))
+            self.gc2 = nn.Parameter(torch.empty(nhid, nclass))
+            nn.init.xavier_uniform_(self.gc1)
+            nn.init.xavier_uniform_(self.gc2)
+
+        def forward(self, x: torch.Tensor, adj_norm: torch.Tensor) -> torch.Tensor:
+            h = adj_norm @ x
+            h = h @ self.gc1
+            h = F.relu(h)
+            h = adj_norm @ h
+            out = h @ self.gc2
+            return out
+
+    @staticmethod
+    def _largest_indices(ary: np.ndarray, n: int):
+        flat = ary.flatten()
+        if n <= 0:
+            return (np.array([], dtype=int), np.array([], dtype=int))
+        n = min(n, flat.size)
+        indices = np.argpartition(flat, -n)[-n:]
+        indices = indices[np.argsort(-flat[indices])]
+        return np.unravel_index(indices, ary.shape)
+
+    @staticmethod
+    def _find_my_soln(W: np.ndarray) -> np.ndarray:
+        ATA = np.dot(W, W.T)
+        w, v = np.linalg.eig(ATA)
+        return v[:, 0]
+
+    @staticmethod
+    def _do_perturb_adj(a: np.ndarray, m: np.ndarray) -> np.ndarray:
+        a_bol = np.array(a, dtype=bool)
+        m_bol = np.array(m, dtype=bool)
+        a2 = np.logical_xor(a_bol, m_bol)
+        return a2.astype(float)
+
+    @staticmethod
+    def _a_to_edge_index(A: np.ndarray) -> np.ndarray:
+        rows, cols = np.nonzero(A)
+        return np.vstack([rows, cols])
+
+    def _resolve_target_type(self, data: HeteroData) -> str:
+        if self.target_node_type:
+            return self.target_node_type
+        dm = self.dataset_module
+        for attr in ["target", "target_node_type", "target_node"]:
+            if hasattr(dm, attr):
+                v = getattr(dm, attr)
+                if isinstance(v, str) and v:
+                    return v
+        if self.victim_model is not None and hasattr(self.victim_model, "target_node"):
+            v = getattr(self.victim_model, "target_node")
+            if isinstance(v, str) and v:
+                return v
+        if hasattr(data, "node_types") and len(data.node_types) == 1:
+            return data.node_types[0]
+        raise ValueError("[MintaAttacker] Cannot infer target node type. Please set target_node_type.")
+
+    def _resolve_edge_types(self, data: HeteroData, target: str) -> Tuple[list, Tuple[str, str, str]]:
+        edge_types_for_A = self.edge_types_for_A
+        edge_type_to_perturb = self.edge_type_to_perturb
+
+        if edge_types_for_A is None:
+            edge_types_for_A = [et for et in data.edge_types if et[0] == target and et[2] == target]
+        if not edge_types_for_A:
+            edge_types_for_A = [data.edge_types[0]]
+
+        if edge_type_to_perturb is None:
+            edge_type_to_perturb = edge_types_for_A[0]
+
+        return edge_types_for_A, edge_type_to_perturb
+
+    def _select_adv_nodes(self, data: HeteroData, target: str) -> np.ndarray:
+        if target not in data.node_types:
+            raise ValueError(f"[MintaAttacker] target_node_type '{target}' not in data.node_types.")
+
+        y = data[target].y
+        test_mask = data[target].test_mask if hasattr(data[target], "test_mask") else None
+        if test_mask is None:
+            raise ValueError("[MintaAttacker] target node test_mask is required to sample adversarial nodes.")
+
+        test_idx = test_mask.nonzero(as_tuple=False).view(-1).cpu().numpy()
+        if y is not None:
+            y_test = y[test_mask].cpu().numpy()
+            mal_idx = test_idx[y_test == 1]
+        else:
+            mal_idx = test_idx
+
+        if len(mal_idx) == 0:
+            raise ValueError("[MintaAttacker] No malicious test nodes found for adversarial sampling.")
+
+        k = min(self.adv_nodes_test_size, len(mal_idx))
+        return np.array(random.sample(list(mal_idx), k), dtype=int)
+
+    def _extract_A_adv(self, data: HeteroData, adv_nodes: np.ndarray, edge_types_for_A: list, target: str) -> np.ndarray:
+        n = len(adv_nodes)
+        A = np.zeros((n, n), dtype=int)
+
+        node_map = -np.ones((data[target].num_nodes,), dtype=int)
+        node_map[adv_nodes] = np.arange(n)
+
+        for et in edge_types_for_A:
+            if et not in data.edge_types:
+                continue
+            edge_index = data[et].edge_index
+            src = edge_index[0].cpu().numpy()
+            dst = edge_index[1].cpu().numpy()
+            src_m = node_map[src]
+            dst_m = node_map[dst]
+            mask = (src_m >= 0) & (dst_m >= 0)
+            A[src_m[mask], dst_m[mask]] = 1
+
+        return A
+
+    def _train_surrogate(
+        self,
+        features: torch.Tensor,
+        adj: np.ndarray,
+        labels: torch.Tensor,
+        device: torch.device,
+    ) -> nn.Module:
+        n_nodes, n_feat = features.shape
+        nclass = int(labels.max().item()) + 1
+        surrogate = self._SurrogateGCN(n_feat, self.surrogate_hidden, nclass).to(device)
+
+        A = torch.tensor(adj, dtype=torch.float, device=device)
+        A = A + torch.eye(n_nodes, device=device)
+        deg = A.sum(dim=1)
+        deg_inv_sqrt = deg.pow(-0.5)
+        deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0.0
+        A_norm = deg_inv_sqrt.view(-1, 1) * A * deg_inv_sqrt.view(1, -1)
+
+        optimizer = torch.optim.Adam(surrogate.parameters(), lr=self.surrogate_lr)
+        features = features.to(device)
+        labels = labels.to(device)
+
+        for _ in range(self.surrogate_epochs):
+            surrogate.train()
+            optimizer.zero_grad()
+            out = surrogate(features, A_norm)
+            loss = F.cross_entropy(out, labels)
+            loss.backward()
+            optimizer.step()
+
+        return surrogate
+
+    def _feat_perturb(
+        self,
+        x: torch.Tensor,
+        A_adv: np.ndarray,
+        surrogate: nn.Module,
+        val: int,
+        adv_nodes_test: np.ndarray,
+        preds: np.ndarray,
+    ) -> torch.Tensor:
+        x2 = x.clone()
+        X = x[adv_nodes_test].cpu().numpy()
+        X2 = copy.deepcopy(X)
+
+        W1 = surrogate.gc1.data.cpu().numpy()
+        F1 = self._find_my_soln(W1)
+
+        for i in range(min(val, len(adv_nodes_test))):
+            if preds[i] > 0:
+                temp = A_adv[i, :]
+                js = np.flatnonzero(temp)
+                messages = np.dot(A_adv, X2)
+                F2 = 0 * F1
+                message_j = np.zeros_like(F1)
+                for kk in np.arange(len(js)):
+                    message_j = messages[js[kk], :]
+                W2 = copy.deepcopy(W1)
+                d_j = len(js)
+                for kkk in np.arange(W2.shape[1]):
+                    if d_j > 0:
+                        W2[:, kkk] = W1[:, kkk] - 1 / d_j * message_j
+                F2 = F2 + self._find_my_soln(W2)
+                feat_up = (1 * F1 + 1 * F2) / 2
+                X2[i, :] = X2[i, :] + feat_up[:]
+
+        x2[adv_nodes_test, :] = torch.from_numpy(X2).to(x2.device)
+        return x2
+
+    def _adj_perturb_sim_apex(
+        self,
+        edge_index: torch.Tensor,
+        x: torch.Tensor,
+        A_adv: np.ndarray,
+        surrogate: nn.Module,
+        val: int,
+        adv_nodes_test: np.ndarray,
+    ) -> torch.Tensor:
+        temp0 = edge_index.cpu().numpy()
+        X = x[adv_nodes_test].cpu().numpy()
+        W1 = surrogate.gc1.data.cpu().numpy()
+        F1 = self._find_my_soln(W1)
+
+        n = len(adv_nodes_test)
+        simi_arr = np.zeros((n, n))
+        messages = np.dot(A_adv, X)
+
+        for i in range(n):
+            tempx = A_adv[i, :]
+            js = np.flatnonzero(tempx)
+            for j in range(n):
+                W2 = copy.deepcopy(W1)
+                d_j = len(js)
+                message_j = np.zeros_like(F1)
+                for kk in np.arange(len(js)):
+                    message_j = messages[js[kk], :]
+                for kkk in np.arange(W2.shape[1]):
+                    if d_j > 0:
+                        W2[:, kkk] = W1[:, kkk] - 1 / d_j * message_j
+                F2 = self._find_my_soln(W2)
+                simi_arr[i, j] = np.linalg.norm(1 * F1 + 1 * F2)
+
+        top_k = max(1, val * val)
+        largest_idx = self._largest_indices(simi_arr, top_k)
+
+        m = np.zeros((n, n))
+        for idx in range(len(largest_idx[0])):
+            m[largest_idx[0][idx], largest_idx[1][idx]] = 1
+
+        A2 = self._do_perturb_adj(A_adv, m)
+        aa = self._a_to_edge_index(A2)
+
+        conv = np.zeros_like(aa)
+        for k in range(aa.shape[1]):
+            conv[0, k] = adv_nodes_test[aa[0, k]]
+            conv[1, k] = adv_nodes_test[aa[1, k]]
+
+        all_edges = temp0
+        adv_edge_lox = np.nonzero(np.in1d(all_edges[0, :], adv_nodes_test))[0]
+        non_adv_edges = np.delete(all_edges, adv_edge_lox, axis=1)
+        temp2 = np.hstack((non_adv_edges, conv))
+
+        return torch.tensor(temp2, dtype=torch.long, device=edge_index.device)
+
+    def attack(self, data):
+        if not isinstance(data, HeteroData):
+            raise RuntimeError("MintaAttacker expects HeteroData input.")
+
+        if self.seed is not None:
+            random.seed(self.seed)
+            np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
+
+        target = self._resolve_target_type(data)
+        edge_types_for_A, edge_type_to_perturb = self._resolve_edge_types(data, target)
+        if edge_type_to_perturb not in data.edge_types:
+            raise ValueError(f"[MintaAttacker] edge_type_to_perturb {edge_type_to_perturb} not in data.edge_types.")
+
+        device = torch.device(self.device) if self.device is not None else data[target].x.device
+        out = data.clone()
+
+        # 1) Sample adversarial nodes
+        adv_nodes_test = self._select_adv_nodes(out, target)
+
+        # 2) Build A_adv for adversarial nodes
+        A_adv = self._extract_A_adv(out, adv_nodes_test, edge_types_for_A, target)
+
+        # 3) Train surrogate on a subset of training nodes
+        train_mask = out[target].train_mask
+        labels = out[target].y
+        labeled_mask = labels < 2 if labels is not None else train_mask
+        train_idx = (train_mask & labeled_mask).nonzero(as_tuple=False).view(-1).cpu().numpy()
+        if len(train_idx) == 0:
+            raise ValueError("[MintaAttacker] No labeled training nodes available for surrogate training.")
+
+        k = min(self.surrogate_train_size, len(train_idx))
+        adv_nodes_train = train_idx[:k]
+
+        A_sur = self._extract_A_adv(out, adv_nodes_train, edge_types_for_A, target)
+        features_sur = out[target].x[adv_nodes_train].float()
+
+        if self.victim_model is not None:
+            self.victim_model.eval()
+            with torch.no_grad():
+                pred_raw = self.victim_model(out.x_dict, out.edge_index_dict)
+                labels_sur = pred_raw.argmax(dim=-1)[adv_nodes_train]
+        else:
+            labels_sur = out[target].y[adv_nodes_train]
+
+        surrogate = self._train_surrogate(features_sur, A_sur, labels_sur, device=device)
+
+        # 4) Predictions for adversarial nodes (victim if available, else ground-truth)
+        if self.victim_model is not None:
+            self.victim_model.eval()
+            with torch.no_grad():
+                preds = self.victim_model(out.x_dict, out.edge_index_dict).argmax(dim=-1)
+            preds_adv = preds[adv_nodes_test].cpu().numpy()
+        else:
+            preds_adv = out[target].y[adv_nodes_test].cpu().numpy()
+
+        # 5) Determine number of perturbations
+        val = max(1, int(self.perturb_ratio * len(adv_nodes_test)))
+
+        # 6) Feature perturbation
+        x = out[target].x
+        x2 = self._feat_perturb(x, A_adv, surrogate, val, adv_nodes_test, preds_adv)
+        out[target].x = x2
+
+        # 7) Adjacency perturbation (apex relation by default)
+        edge_index = out[edge_type_to_perturb].edge_index
+        new_edge_index = self._adj_perturb_sim_apex(edge_index, x, A_adv, surrogate, val, adv_nodes_test)
+        out[edge_type_to_perturb].edge_index = new_edge_index
+
+        return out
 
 # class nettack():
 #     pass
