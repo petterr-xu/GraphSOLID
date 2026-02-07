@@ -263,6 +263,303 @@ class DefaultPipeline:
 
         return summary
 
+    def poison_then_defend(
+        self,
+        train_split: str = "train",
+        eval_split: str = "test",
+        train_epochs: int = 1,
+        shuffle: bool = False,
+        log_every: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Poison the training split, retrain classifier, then evaluate clean/attacked/defended on eval_split.
+
+        Flow:
+          1) poisoned_train = attacker.attack(train_data)
+          2) train classifier on poisoned_train
+          3) eval clean/attacked/defended on eval_split
+
+        Outputs:
+          - {eval_split}_poison_then_defend_results.pt  (full tensors)
+          - {eval_split}_poison_then_defend_metrics.json (metrics only)
+        """
+        # -------- 1) build poisoned training set --------
+        train_ds = self._get_split_dataset(train_split)
+        if len(train_ds) == 0:
+            raise ValueError(f"Empty dataset for split='{train_split}'.")
+
+        poisoned_train = []
+        for i in tqdm(range(len(train_ds)), desc=f"Poisoning {train_split}"):
+            g = train_ds[i]
+            g_poison = self.attacker.attack(g.clone() if hasattr(g, "clone") else g)
+            poisoned_train.append(g_poison)
+
+        # -------- 2) train on poisoned data --------
+        history: List[Dict[str, float]] = []
+        for epoch in tqdm(range(train_epochs), desc=f"Poison-Train ({train_split})"):
+            if shuffle:
+                order = torch.randperm(len(poisoned_train)).tolist()
+            else:
+                order = list(range(len(poisoned_train)))
+
+            train_losses = []
+            val_losses = []
+            for i in tqdm(order, desc=f"Poison training epoch {epoch + 1}/{train_epochs}", leave=False):
+                data = poisoned_train[i]
+                if hasattr(data, "to"):
+                    data = data.to(self.device)
+                train_loss, val_loss = self.train_classifier_vanilla_oneloop(data)
+                train_losses.append(train_loss)
+                val_losses.append(val_loss)
+
+            avg_train = float(sum(train_losses) / max(len(train_losses), 1))
+            avg_val = float(sum(val_losses) / max(len(val_losses), 1))
+            history.append({"epoch": epoch + 1, "train_loss": avg_train, "val_loss": avg_val})
+
+            tqdm.write(
+                f"[poison_then_defend] epoch={epoch + 1}/{train_epochs} | "
+                f"train_loss={avg_train:.6f} | val_loss={avg_val:.6f}"
+            )
+
+        # -------- 3) evaluate on eval split --------
+        ds = self._get_split_dataset(eval_split)
+
+        sample0 = ds[0] if len(ds) > 0 else None
+        if sample0 is None:
+            raise ValueError(f"Empty dataset for split='{eval_split}'.")
+        target_type = self._infer_target_type(sample0)
+
+        total = len(ds)
+        clean_total_eval = 0
+        clean_total_correct = 0
+        attacked_total_eval = 0
+        attacked_total_correct = 0
+        defended_total_eval = 0
+        defended_total_correct = 0
+
+        clean_confusion = None
+        attacked_confusion = None
+        defended_confusion = None
+
+        clean_per_sample: List[Dict[str, Any]] = []
+        attacked_per_sample: List[Dict[str, Any]] = []
+        defended_per_sample: List[Dict[str, Any]] = []
+
+        for i in tqdm(range(total), desc=f"Evaluating {eval_split} (clean/attacked/defended)"):
+            g = ds[i]
+
+            # clean
+            clean_res = self._eval_classifier_on_graph(g, split=eval_split, target_type=target_type)
+            clean_total_eval += clean_res["num_eval"]
+            clean_total_correct += clean_res["num_correct"]
+            clean_confusion = (
+                clean_res["confusion"].clone()
+                if clean_confusion is None
+                else clean_confusion + clean_res["confusion"]
+            )
+            clean_per_sample.append(
+                {
+                    "sample_id": i,
+                    "num_eval": clean_res["num_eval"],
+                    "num_correct": clean_res["num_correct"],
+                    "acc": clean_res["acc"],
+                    "metrics": clean_res["metrics"],
+                    "y_true": clean_res["y_true"],
+                    "y_pred": clean_res["y_pred"],
+                    "logits": clean_res["logits"],
+                    "node_idx": clean_res["node_idx"],
+                }
+            )
+
+            # attacked
+            g_attacked = self.attacker.attack(g.clone() if hasattr(g, "clone") else g)
+            attacked_res = self._eval_classifier_on_graph(g_attacked, split=eval_split, target_type=target_type)
+            attacked_total_eval += attacked_res["num_eval"]
+            attacked_total_correct += attacked_res["num_correct"]
+            attacked_confusion = (
+                attacked_res["confusion"].clone()
+                if attacked_confusion is None
+                else attacked_confusion + attacked_res["confusion"]
+            )
+            attacked_per_sample.append(
+                {
+                    "sample_id": i,
+                    "num_eval": attacked_res["num_eval"],
+                    "num_correct": attacked_res["num_correct"],
+                    "acc": attacked_res["acc"],
+                    "metrics": attacked_res["metrics"],
+                    "y_true": attacked_res["y_true"],
+                    "y_pred": attacked_res["y_pred"],
+                    "logits": attacked_res["logits"],
+                    "node_idx": attacked_res["node_idx"],
+                }
+            )
+
+            # defended (attack then defend)
+            g_defended = self.defender.defend(g_attacked.clone() if hasattr(g_attacked, "clone") else g_attacked)
+            defended_res = self._eval_classifier_on_graph(g_defended, split=eval_split, target_type=target_type)
+            defended_total_eval += defended_res["num_eval"]
+            defended_total_correct += defended_res["num_correct"]
+            defended_confusion = (
+                defended_res["confusion"].clone()
+                if defended_confusion is None
+                else defended_confusion + defended_res["confusion"]
+            )
+            defended_per_sample.append(
+                {
+                    "sample_id": i,
+                    "num_eval": defended_res["num_eval"],
+                    "num_correct": defended_res["num_correct"],
+                    "acc": defended_res["acc"],
+                    "metrics": defended_res["metrics"],
+                    "y_true": defended_res["y_true"],
+                    "y_pred": defended_res["y_pred"],
+                    "logits": defended_res["logits"],
+                    "node_idx": defended_res["node_idx"],
+                }
+            )
+
+            if log_every and (i + 1) % log_every == 0:
+                print(
+                    f"[{eval_split} #{i + 1}/{total}] "
+                    f"clean acc={clean_res['acc']:.4f} "
+                    f"macro_f1={clean_res['metrics']['macro_f1']:.4f} "
+                    f"macro_recall={clean_res['metrics']['macro_recall']:.4f} | "
+                    f"attacked acc={attacked_res['acc']:.4f} "
+                    f"macro_f1={attacked_res['metrics']['macro_f1']:.4f} "
+                    f"macro_recall={attacked_res['metrics']['macro_recall']:.4f} | "
+                    f"defended acc={defended_res['acc']:.4f} "
+                    f"macro_f1={defended_res['metrics']['macro_f1']:.4f} "
+                    f"macro_recall={defended_res['metrics']['macro_recall']:.4f}"
+                )
+
+        clean_micro_acc = float("nan") if clean_total_eval == 0 else (clean_total_correct / clean_total_eval)
+        attacked_micro_acc = float("nan") if attacked_total_eval == 0 else (attacked_total_correct / attacked_total_eval)
+        defended_micro_acc = float("nan") if defended_total_eval == 0 else (defended_total_correct / defended_total_eval)
+
+        clean_metrics = self._metrics_from_confusion(clean_confusion, total_eval=clean_total_eval)
+        attacked_metrics = self._metrics_from_confusion(attacked_confusion, total_eval=attacked_total_eval)
+        defended_metrics = self._metrics_from_confusion(defended_confusion, total_eval=defended_total_eval)
+
+        def _mean_var(vals: List[float]) -> Tuple[float, float]:
+            if len(vals) == 0:
+                return float("nan"), float("nan")
+            t = torch.tensor(vals, dtype=torch.float)
+            return float(t.mean().item()), float(t.var(unbiased=False).item())
+
+        clean_acc_mean, clean_acc_var = _mean_var([r["acc"] for r in clean_per_sample])
+        attacked_acc_mean, attacked_acc_var = _mean_var([r["acc"] for r in attacked_per_sample])
+        defended_acc_mean, defended_acc_var = _mean_var([r["acc"] for r in defended_per_sample])
+
+        clean_macro_f1_mean, clean_macro_f1_var = _mean_var([r["metrics"]["macro_f1"] for r in clean_per_sample])
+        attacked_macro_f1_mean, attacked_macro_f1_var = _mean_var([r["metrics"]["macro_f1"] for r in attacked_per_sample])
+        defended_macro_f1_mean, defended_macro_f1_var = _mean_var([r["metrics"]["macro_f1"] for r in defended_per_sample])
+
+        clean_macro_recall_mean, clean_macro_recall_var = _mean_var([r["metrics"]["macro_recall"] for r in clean_per_sample])
+        attacked_macro_recall_mean, attacked_macro_recall_var = _mean_var([r["metrics"]["macro_recall"] for r in attacked_per_sample])
+        defended_macro_recall_mean, defended_macro_recall_var = _mean_var([r["metrics"]["macro_recall"] for r in defended_per_sample])
+
+        summary: Dict[str, Any] = {
+            "train_split": train_split,
+            "eval_split": eval_split,
+            "target_type": target_type,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "poison_train_history": history,
+            "metrics": {
+                "clean_micro_acc": clean_micro_acc,
+                "attacked_micro_acc": attacked_micro_acc,
+                "defended_micro_acc": defended_micro_acc,
+                "clean_total_eval": int(clean_total_eval),
+                "attacked_total_eval": int(attacked_total_eval),
+                "defended_total_eval": int(defended_total_eval),
+                "clean_micro_precision": clean_metrics["micro_precision"],
+                "clean_micro_recall": clean_metrics["micro_recall"],
+                "clean_micro_f1": clean_metrics["micro_f1"],
+                "clean_macro_precision": clean_metrics["macro_precision"],
+                "clean_macro_recall": clean_metrics["macro_recall"],
+                "clean_macro_f1": clean_metrics["macro_f1"],
+                "attacked_micro_precision": attacked_metrics["micro_precision"],
+                "attacked_micro_recall": attacked_metrics["micro_recall"],
+                "attacked_micro_f1": attacked_metrics["micro_f1"],
+                "attacked_macro_precision": attacked_metrics["macro_precision"],
+                "attacked_macro_recall": attacked_metrics["macro_recall"],
+                "attacked_macro_f1": attacked_metrics["macro_f1"],
+                "defended_micro_precision": defended_metrics["micro_precision"],
+                "defended_micro_recall": defended_metrics["micro_recall"],
+                "defended_micro_f1": defended_metrics["micro_f1"],
+                "defended_macro_precision": defended_metrics["macro_precision"],
+                "defended_macro_recall": defended_metrics["macro_recall"],
+                "defended_macro_f1": defended_metrics["macro_f1"],
+                "clean_acc_mean": clean_acc_mean,
+                "clean_acc_var": clean_acc_var,
+                "clean_macro_f1_mean": clean_macro_f1_mean,
+                "clean_macro_f1_var": clean_macro_f1_var,
+                "clean_macro_recall_mean": clean_macro_recall_mean,
+                "clean_macro_recall_var": clean_macro_recall_var,
+                "attacked_acc_mean": attacked_acc_mean,
+                "attacked_acc_var": attacked_acc_var,
+                "attacked_macro_f1_mean": attacked_macro_f1_mean,
+                "attacked_macro_f1_var": attacked_macro_f1_var,
+                "attacked_macro_recall_mean": attacked_macro_recall_mean,
+                "attacked_macro_recall_var": attacked_macro_recall_var,
+                "defended_acc_mean": defended_acc_mean,
+                "defended_acc_var": defended_acc_var,
+                "defended_macro_f1_mean": defended_macro_f1_mean,
+                "defended_macro_f1_var": defended_macro_f1_var,
+                "defended_macro_recall_mean": defended_macro_recall_mean,
+                "defended_macro_recall_var": defended_macro_recall_var,
+            },
+            "details": {
+                "clean": {
+                    "micro_acc": clean_micro_acc,
+                    "total_eval": int(clean_total_eval),
+                    "total_correct": int(clean_total_correct),
+                    "per_sample": clean_per_sample,
+                },
+                "attacked": {
+                    "micro_acc": attacked_micro_acc,
+                    "total_eval": int(attacked_total_eval),
+                    "total_correct": int(attacked_total_correct),
+                    "per_sample": attacked_per_sample,
+                },
+                "defended": {
+                    "micro_acc": defended_micro_acc,
+                    "total_eval": int(defended_total_eval),
+                    "total_correct": int(defended_total_correct),
+                    "per_sample": defended_per_sample,
+                },
+            },
+        }
+
+        out_dir = self._resolve_output_dir()
+        tag = f"{eval_split}_poison_then_defend"
+        pt_path = os.path.join(out_dir, f"{tag}_results.pt")
+        json_path = os.path.join(out_dir, f"{tag}_metrics.json")
+
+        torch.save(summary, pt_path)
+
+        metrics_only = {
+            "train_split": summary["train_split"],
+            "eval_split": summary["eval_split"],
+            "target_type": summary["target_type"],
+            "timestamp": summary["timestamp"],
+            "metrics": summary["metrics"],
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(metrics_only, f, ensure_ascii=False, indent=2)
+
+        print(
+            f"[{tag}] clean={summary['metrics']['clean_micro_acc']:.4f} "
+            f"(macro_f1={summary['metrics']['clean_macro_f1']:.4f}) | "
+            f"attacked={summary['metrics']['attacked_micro_acc']:.4f} "
+            f"(macro_f1={summary['metrics']['attacked_macro_f1']:.4f}) | "
+            f"defended={summary['metrics']['defended_micro_acc']:.4f} "
+            f"(macro_f1={summary['metrics']['defended_macro_f1']:.4f}) "
+            f"(saved to {out_dir})"
+        )
+
+        return summary
+
     # -----------------------------
     # Dataset / config helpers
     # -----------------------------
