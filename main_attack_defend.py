@@ -14,7 +14,7 @@ from matplotlib import pyplot as plt
 
 from src import loss_fn
 from src.models import HeteroNN
-from src.attack.attacker import Metattacker, RandomAttacker
+from src.attack.attacker import Metattacker, RandomAttacker, MintaAttacker
 from src.attack.pipeline import DefaultPipeline
 from src.attack.defender import DiffusionPurifyDefender
 from src.utils import VNG_utils, graphbuilder
@@ -138,6 +138,8 @@ def main(cfg: DictConfig):
         attacker = Metattacker(datamodule,perturb_ratio=cfg.general.perturb_ratio,re_trainings=5,device=gpuid,train_iters = 200)
     elif cfg.general.attack_method == 'random':
         attacker = RandomAttacker(datamodule, perturb_ratio=cfg.general.perturb_ratio)
+    elif cfg.general.attack_method == 'minta':
+        attacker = MintaAttacker(datamodule, perturb_ratio=cfg.general.perturb_ratio)
     else:
         raise NotImplementedError("Unknown attack method {}".format(cfg.general.attack_method))
     diffusionDefender = DiffusionPurifyDefender(diffusion_steps=10, diffusion_model=model, metapaths=cfg.dataset.metapaths, target_node_type=cfg.dataset.target)
