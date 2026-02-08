@@ -1,6 +1,5 @@
 import os
 import json
-import warnings
 from tqdm import tqdm
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -11,7 +10,7 @@ import torch.nn as nn
 from .attacker import Attacker
 from .defender import Defender
 from src.dataset.abstract_dataset import AbstractDataModule
-from src import loss_fn
+from src.models.classifier_engine import HeteroClassifierEngine
 
 
 class DefaultPipeline:
@@ -55,12 +54,20 @@ class DefaultPipeline:
         self.classifier_optimizer = classifier_optimizer
         self.classifier_criterion = classifier_criterion
         self.cl_scheduler = cl_scheduler
+        self.classifier_engine = HeteroClassifierEngine(
+            model=self.classifier,
+            optimizer=self.classifier_optimizer,
+            criterion=self.classifier_criterion,
+            scheduler=self.cl_scheduler,
+            target_node=self.target,
+            device=self.device,
+        )
         self._to_device(device)
 
     def _to_device(self, device):
         if device is None:
             raise ValueError("Device must be specified.")
-        self.classifier.to(device)
+        self.classifier_engine.to(device)
         self.defender.to(device)
 
 
@@ -265,282 +272,175 @@ class DefaultPipeline:
 
     def poison_then_defend(
         self,
-        train_split: str = "train",
-        eval_split: str = "test",
+        split: str = "test",
         train_epochs: int = 1,
         shuffle: bool = False,
         log_every: int = 1,
     ) -> Dict[str, Any]:
         """
-        Poison the training split, retrain classifier, then evaluate clean/attacked/defended on eval_split.
+        Poison and defend on the same subgraph split, then retrain/evaluate classifier per dataset variant.
 
-        Flow:
-          1) poisoned_train = attacker.attack(train_data)
-          2) train classifier on poisoned_train
-          3) eval clean/attacked/defended on eval_split
+        Flow (for subgraph split `split`, default "test"):
+          1) build poisoned_split = attacker.attack(split[i]) for all subgraphs
+          2) build defended_split = defender.defend(poisoned_split[i]) for all subgraphs
+          3) reset classifier -> train on clean split -> eval on node-level test_mask
+          4) reset classifier -> train on poisoned split -> eval on node-level test_mask
+          5) reset classifier -> train on defended split -> eval on node-level test_mask
 
         Outputs:
-          - {eval_split}_poison_then_defend_results.pt  (full tensors)
-          - {eval_split}_poison_then_defend_metrics.json (metrics only)
+          - {split}_poison_then_defend_results.pt  (full tensors)
+          - {split}_poison_then_defend_metrics.json (metrics only)
         """
-        # -------- 1) build poisoned training set --------
-        train_ds = self._get_split_dataset(train_split)
-        if len(train_ds) == 0:
-            raise ValueError(f"Empty dataset for split='{train_split}'.")
-
-        poisoned_train = []
-        for i in tqdm(range(len(train_ds)), desc=f"Poisoning {train_split}"):
-            g = train_ds[i]
-            g_poison = self.attacker.attack(g.clone() if hasattr(g, "clone") else g)
-            poisoned_train.append(g_poison)
-
-        # -------- 2) train on poisoned data --------
-        history: List[Dict[str, float]] = []
-        for epoch in tqdm(range(train_epochs), desc=f"Poison-Train ({train_split})"):
-            if shuffle:
-                order = torch.randperm(len(poisoned_train)).tolist()
-            else:
-                order = list(range(len(poisoned_train)))
-
-            train_losses = []
-            val_losses = []
-            for i in tqdm(order, desc=f"Poison training epoch {epoch + 1}/{train_epochs}", leave=False):
-                data = poisoned_train[i]
-                if hasattr(data, "to"):
-                    data = data.to(self.device)
-                train_loss, val_loss = self.train_classifier_vanilla_oneloop(data)
-                train_losses.append(train_loss)
-                val_losses.append(val_loss)
-
-            avg_train = float(sum(train_losses) / max(len(train_losses), 1))
-            avg_val = float(sum(val_losses) / max(len(val_losses), 1))
-            history.append({"epoch": epoch + 1, "train_loss": avg_train, "val_loss": avg_val})
-
-            tqdm.write(
-                f"[poison_then_defend] epoch={epoch + 1}/{train_epochs} | "
-                f"train_loss={avg_train:.6f} | val_loss={avg_val:.6f}"
-            )
-
-        # -------- 3) evaluate on eval split --------
-        ds = self._get_split_dataset(eval_split)
-
+        ds = self._get_split_dataset(split)
         sample0 = ds[0] if len(ds) > 0 else None
         if sample0 is None:
-            raise ValueError(f"Empty dataset for split='{eval_split}'.")
+            raise ValueError(f"Empty dataset for split='{split}'.")
         target_type = self._infer_target_type(sample0)
 
-        total = len(ds)
-        clean_total_eval = 0
-        clean_total_correct = 0
-        attacked_total_eval = 0
-        attacked_total_correct = 0
-        defended_total_eval = 0
-        defended_total_correct = 0
-
-        clean_confusion = None
-        attacked_confusion = None
-        defended_confusion = None
-
-        clean_per_sample: List[Dict[str, Any]] = []
-        attacked_per_sample: List[Dict[str, Any]] = []
-        defended_per_sample: List[Dict[str, Any]] = []
-
-        for i in tqdm(range(total), desc=f"Evaluating {eval_split} (clean/attacked/defended)"):
+        # Build poisoned/defended datasets from the same subgraph split to avoid cross-split leakage.
+        poisoned_ds: List[Any] = []
+        defended_ds: List[Any] = []
+        for i in tqdm(range(len(ds)), desc=f"Preparing {split} (poison/defend)"):
             g = ds[i]
-
-            # clean
-            clean_res = self._eval_classifier_on_graph(g, split=eval_split, target_type=target_type)
-            clean_total_eval += clean_res["num_eval"]
-            clean_total_correct += clean_res["num_correct"]
-            clean_confusion = (
-                clean_res["confusion"].clone()
-                if clean_confusion is None
-                else clean_confusion + clean_res["confusion"]
-            )
-            clean_per_sample.append(
-                {
-                    "sample_id": i,
-                    "num_eval": clean_res["num_eval"],
-                    "num_correct": clean_res["num_correct"],
-                    "acc": clean_res["acc"],
-                    "metrics": clean_res["metrics"],
-                    "y_true": clean_res["y_true"],
-                    "y_pred": clean_res["y_pred"],
-                    "logits": clean_res["logits"],
-                    "node_idx": clean_res["node_idx"],
-                }
-            )
-
-            # attacked
-            g_attacked = self.attacker.attack(g.clone() if hasattr(g, "clone") else g)
-            attacked_res = self._eval_classifier_on_graph(g_attacked, split=eval_split, target_type=target_type)
-            attacked_total_eval += attacked_res["num_eval"]
-            attacked_total_correct += attacked_res["num_correct"]
-            attacked_confusion = (
-                attacked_res["confusion"].clone()
-                if attacked_confusion is None
-                else attacked_confusion + attacked_res["confusion"]
-            )
-            attacked_per_sample.append(
-                {
-                    "sample_id": i,
-                    "num_eval": attacked_res["num_eval"],
-                    "num_correct": attacked_res["num_correct"],
-                    "acc": attacked_res["acc"],
-                    "metrics": attacked_res["metrics"],
-                    "y_true": attacked_res["y_true"],
-                    "y_pred": attacked_res["y_pred"],
-                    "logits": attacked_res["logits"],
-                    "node_idx": attacked_res["node_idx"],
-                }
-            )
-
-            # defended (attack then defend)
-            g_defended = self.defender.defend(g_attacked.clone() if hasattr(g_attacked, "clone") else g_attacked)
-            defended_res = self._eval_classifier_on_graph(g_defended, split=eval_split, target_type=target_type)
-            defended_total_eval += defended_res["num_eval"]
-            defended_total_correct += defended_res["num_correct"]
-            defended_confusion = (
-                defended_res["confusion"].clone()
-                if defended_confusion is None
-                else defended_confusion + defended_res["confusion"]
-            )
-            defended_per_sample.append(
-                {
-                    "sample_id": i,
-                    "num_eval": defended_res["num_eval"],
-                    "num_correct": defended_res["num_correct"],
-                    "acc": defended_res["acc"],
-                    "metrics": defended_res["metrics"],
-                    "y_true": defended_res["y_true"],
-                    "y_pred": defended_res["y_pred"],
-                    "logits": defended_res["logits"],
-                    "node_idx": defended_res["node_idx"],
-                }
-            )
-
+            g_poison = self.attacker.attack(g.clone() if hasattr(g, "clone") else g)
+            g_defend = self.defender.defend(g_poison.clone() if hasattr(g_poison, "clone") else g_poison)
+            poisoned_ds.append(g_poison)
+            defended_ds.append(g_defend)
             if log_every and (i + 1) % log_every == 0:
-                print(
-                    f"[{eval_split} #{i + 1}/{total}] "
-                    f"clean acc={clean_res['acc']:.4f} "
-                    f"macro_f1={clean_res['metrics']['macro_f1']:.4f} "
-                    f"macro_recall={clean_res['metrics']['macro_recall']:.4f} | "
-                    f"attacked acc={attacked_res['acc']:.4f} "
-                    f"macro_f1={attacked_res['metrics']['macro_f1']:.4f} "
-                    f"macro_recall={attacked_res['metrics']['macro_recall']:.4f} | "
-                    f"defended acc={defended_res['acc']:.4f} "
-                    f"macro_f1={defended_res['metrics']['macro_f1']:.4f} "
-                    f"macro_recall={defended_res['metrics']['macro_recall']:.4f}"
-                )
+                print(f"[prepare #{i + 1}/{len(ds)}] poisoned + defended ready")
 
-        clean_micro_acc = float("nan") if clean_total_eval == 0 else (clean_total_correct / clean_total_eval)
-        attacked_micro_acc = float("nan") if attacked_total_eval == 0 else (attacked_total_correct / attacked_total_eval)
-        defended_micro_acc = float("nan") if defended_total_eval == 0 else (defended_total_correct / defended_total_eval)
+        # Snapshot training state; each stage will restart from the same point.
+        init_state = self.classifier_engine.snapshot_state()
 
-        clean_metrics = self._metrics_from_confusion(clean_confusion, total_eval=clean_total_eval)
-        attacked_metrics = self._metrics_from_confusion(attacked_confusion, total_eval=attacked_total_eval)
-        defended_metrics = self._metrics_from_confusion(defended_confusion, total_eval=defended_total_eval)
+        def _reset_training_state():
+            self.classifier_engine.reset_from_snapshot(init_state, prefer_reset_parameters=True)
 
         def _mean_var(vals: List[float]) -> Tuple[float, float]:
             if len(vals) == 0:
                 return float("nan"), float("nan")
             t = torch.tensor(vals, dtype=torch.float)
+            finite = torch.isfinite(t)
+            if int(finite.sum().item()) == 0:
+                return float("nan"), float("nan")
+            t = t[finite]
             return float(t.mean().item()), float(t.var(unbiased=False).item())
 
-        clean_acc_mean, clean_acc_var = _mean_var([r["acc"] for r in clean_per_sample])
-        attacked_acc_mean, attacked_acc_var = _mean_var([r["acc"] for r in attacked_per_sample])
-        defended_acc_mean, defended_acc_var = _mean_var([r["acc"] for r in defended_per_sample])
+        def _train_on_dataset(dataset, name: str) -> List[Dict[str, float]]:
+            history: List[Dict[str, float]] = []
+            for epoch in tqdm(range(train_epochs), desc=f"Train {name}"):
+                order = torch.randperm(len(dataset)).tolist() if shuffle else list(range(len(dataset)))
+                train_losses = []
+                val_losses = []
+                for idx in tqdm(order, desc=f"{name} epoch {epoch + 1}/{train_epochs}", leave=False):
+                    g = dataset[idx]
+                    g_in = g.clone() if hasattr(g, "clone") else g
+                    if hasattr(g_in, "to"):
+                        g_in = g_in.to(self.device)
+                    train_loss, val_loss = self.train_classifier_vanilla_oneloop(g_in)
+                    train_losses.append(train_loss)
+                    val_losses.append(val_loss)
+                avg_train = float(sum(train_losses) / max(len(train_losses), 1))
+                avg_val = float(sum(val_losses) / max(len(val_losses), 1))
+                history.append({"epoch": epoch + 1, "train_loss": avg_train, "val_loss": avg_val})
+                tqdm.write(
+                    f"[poison_then_defend:{name}] epoch={epoch + 1}/{train_epochs} | "
+                    f"train_loss={avg_train:.6f} | val_loss={avg_val:.6f}"
+                )
+            return history
 
-        clean_macro_f1_mean, clean_macro_f1_var = _mean_var([r["metrics"]["macro_f1"] for r in clean_per_sample])
-        attacked_macro_f1_mean, attacked_macro_f1_var = _mean_var([r["metrics"]["macro_f1"] for r in attacked_per_sample])
-        defended_macro_f1_mean, defended_macro_f1_var = _mean_var([r["metrics"]["macro_f1"] for r in defended_per_sample])
+        def _eval_with_metrics(dataset, name: str) -> Dict[str, Any]:
+            base_eval = self._eval_over_dataset(
+                dataset=dataset,
+                split="test",  # node-level test mask
+                target_type=target_type,
+                transform_fn=None,
+                desc=f"{name} eval",
+            )
+            per_sample = base_eval["per_sample"]
+            total_eval = int(base_eval["total_eval"])
 
-        clean_macro_recall_mean, clean_macro_recall_var = _mean_var([r["metrics"]["macro_recall"] for r in clean_per_sample])
-        attacked_macro_recall_mean, attacked_macro_recall_var = _mean_var([r["metrics"]["macro_recall"] for r in attacked_per_sample])
-        defended_macro_recall_mean, defended_macro_recall_var = _mean_var([r["metrics"]["macro_recall"] for r in defended_per_sample])
+            max_cls = -1
+            for rec in per_sample:
+                if rec["y_true"].numel() > 0:
+                    max_cls = max(max_cls, int(rec["y_true"].max().item()))
+                if rec["y_pred"].numel() > 0:
+                    max_cls = max(max_cls, int(rec["y_pred"].max().item()))
+            num_classes = max(1, max_cls + 1)
+            confusion = torch.zeros((num_classes, num_classes), dtype=torch.long)
+            for rec in per_sample:
+                if rec["y_true"].numel() == 0:
+                    continue
+                y_true = rec["y_true"].to(torch.long)
+                y_pred = rec["y_pred"].to(torch.long)
+                flat = y_true * num_classes + y_pred
+                confusion += torch.bincount(flat, minlength=num_classes * num_classes).view(num_classes, num_classes)
+
+            metrics = self._metrics_from_confusion(confusion, total_eval=total_eval)
+            acc_mean, acc_var = _mean_var([r["acc"] for r in per_sample])
+            macro_f1_mean, macro_f1_var = _mean_var([r["metrics"]["macro_f1"] for r in per_sample if "metrics" in r])
+            macro_recall_mean, macro_recall_var = _mean_var([r["metrics"]["macro_recall"] for r in per_sample if "metrics" in r])
+
+            return {
+                "micro_acc": base_eval["micro_acc"],
+                "total_eval": total_eval,
+                "total_correct": int(base_eval["total_correct"]),
+                "metrics": metrics,
+                "acc_mean": acc_mean,
+                "acc_var": acc_var,
+                "macro_f1_mean": macro_f1_mean,
+                "macro_f1_var": macro_f1_var,
+                "macro_recall_mean": macro_recall_mean,
+                "macro_recall_var": macro_recall_var,
+                "per_sample": per_sample,
+            }
+
+        stages = {
+            "clean": ds,
+            "poisoned": poisoned_ds,
+            "defended": defended_ds,
+        }
+        results: Dict[str, Any] = {}
+
+        for name, stage_ds in stages.items():
+            _reset_training_state()
+            history = _train_on_dataset(stage_ds, name=name)
+            eval_result = _eval_with_metrics(stage_ds, name=name)
+            results[name] = {
+                "train_history": history,
+                "eval": eval_result,
+            }
+            print(
+                f"[poison_then_defend:{name}] "
+                f"test_micro_acc={eval_result['micro_acc']:.4f} | "
+                f"test_macro_f1={eval_result['metrics']['macro_f1']:.4f}"
+            )
 
         summary: Dict[str, Any] = {
-            "train_split": train_split,
-            "eval_split": eval_split,
+            "split": split,
             "target_type": target_type,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "poison_train_history": history,
             "metrics": {
-                "clean_micro_acc": clean_micro_acc,
-                "attacked_micro_acc": attacked_micro_acc,
-                "defended_micro_acc": defended_micro_acc,
-                "clean_total_eval": int(clean_total_eval),
-                "attacked_total_eval": int(attacked_total_eval),
-                "defended_total_eval": int(defended_total_eval),
-                "clean_micro_precision": clean_metrics["micro_precision"],
-                "clean_micro_recall": clean_metrics["micro_recall"],
-                "clean_micro_f1": clean_metrics["micro_f1"],
-                "clean_macro_precision": clean_metrics["macro_precision"],
-                "clean_macro_recall": clean_metrics["macro_recall"],
-                "clean_macro_f1": clean_metrics["macro_f1"],
-                "attacked_micro_precision": attacked_metrics["micro_precision"],
-                "attacked_micro_recall": attacked_metrics["micro_recall"],
-                "attacked_micro_f1": attacked_metrics["micro_f1"],
-                "attacked_macro_precision": attacked_metrics["macro_precision"],
-                "attacked_macro_recall": attacked_metrics["macro_recall"],
-                "attacked_macro_f1": attacked_metrics["macro_f1"],
-                "defended_micro_precision": defended_metrics["micro_precision"],
-                "defended_micro_recall": defended_metrics["micro_recall"],
-                "defended_micro_f1": defended_metrics["micro_f1"],
-                "defended_macro_precision": defended_metrics["macro_precision"],
-                "defended_macro_recall": defended_metrics["macro_recall"],
-                "defended_macro_f1": defended_metrics["macro_f1"],
-                "clean_acc_mean": clean_acc_mean,
-                "clean_acc_var": clean_acc_var,
-                "clean_macro_f1_mean": clean_macro_f1_mean,
-                "clean_macro_f1_var": clean_macro_f1_var,
-                "clean_macro_recall_mean": clean_macro_recall_mean,
-                "clean_macro_recall_var": clean_macro_recall_var,
-                "attacked_acc_mean": attacked_acc_mean,
-                "attacked_acc_var": attacked_acc_var,
-                "attacked_macro_f1_mean": attacked_macro_f1_mean,
-                "attacked_macro_f1_var": attacked_macro_f1_var,
-                "attacked_macro_recall_mean": attacked_macro_recall_mean,
-                "attacked_macro_recall_var": attacked_macro_recall_var,
-                "defended_acc_mean": defended_acc_mean,
-                "defended_acc_var": defended_acc_var,
-                "defended_macro_f1_mean": defended_macro_f1_mean,
-                "defended_macro_f1_var": defended_macro_f1_var,
-                "defended_macro_recall_mean": defended_macro_recall_mean,
-                "defended_macro_recall_var": defended_macro_recall_var,
+                "clean_micro_acc": results["clean"]["eval"]["micro_acc"],
+                "poisoned_micro_acc": results["poisoned"]["eval"]["micro_acc"],
+                "defended_micro_acc": results["defended"]["eval"]["micro_acc"],
+                "clean_macro_f1": results["clean"]["eval"]["metrics"]["macro_f1"],
+                "poisoned_macro_f1": results["poisoned"]["eval"]["metrics"]["macro_f1"],
+                "defended_macro_f1": results["defended"]["eval"]["metrics"]["macro_f1"],
+                "clean_total_eval": results["clean"]["eval"]["total_eval"],
+                "poisoned_total_eval": results["poisoned"]["eval"]["total_eval"],
+                "defended_total_eval": results["defended"]["eval"]["total_eval"],
             },
-            "details": {
-                "clean": {
-                    "micro_acc": clean_micro_acc,
-                    "total_eval": int(clean_total_eval),
-                    "total_correct": int(clean_total_correct),
-                    "per_sample": clean_per_sample,
-                },
-                "attacked": {
-                    "micro_acc": attacked_micro_acc,
-                    "total_eval": int(attacked_total_eval),
-                    "total_correct": int(attacked_total_correct),
-                    "per_sample": attacked_per_sample,
-                },
-                "defended": {
-                    "micro_acc": defended_micro_acc,
-                    "total_eval": int(defended_total_eval),
-                    "total_correct": int(defended_total_correct),
-                    "per_sample": defended_per_sample,
-                },
-            },
+            "details": results,
         }
 
         out_dir = self._resolve_output_dir()
-        tag = f"{eval_split}_poison_then_defend"
+        tag = f"{split}_poison_then_defend"
         pt_path = os.path.join(out_dir, f"{tag}_results.pt")
         json_path = os.path.join(out_dir, f"{tag}_metrics.json")
 
         torch.save(summary, pt_path)
-
         metrics_only = {
-            "train_split": summary["train_split"],
-            "eval_split": summary["eval_split"],
+            "split": summary["split"],
             "target_type": summary["target_type"],
             "timestamp": summary["timestamp"],
             "metrics": summary["metrics"],
@@ -549,12 +449,9 @@ class DefaultPipeline:
             json.dump(metrics_only, f, ensure_ascii=False, indent=2)
 
         print(
-            f"[{tag}] clean={summary['metrics']['clean_micro_acc']:.4f} "
-            f"(macro_f1={summary['metrics']['clean_macro_f1']:.4f}) | "
-            f"attacked={summary['metrics']['attacked_micro_acc']:.4f} "
-            f"(macro_f1={summary['metrics']['attacked_macro_f1']:.4f}) | "
+            f"[{tag}] clean={summary['metrics']['clean_micro_acc']:.4f} | "
+            f"poisoned={summary['metrics']['poisoned_micro_acc']:.4f} | "
             f"defended={summary['metrics']['defended_micro_acc']:.4f} "
-            f"(macro_f1={summary['metrics']['defended_macro_f1']:.4f}) "
             f"(saved to {out_dir})"
         )
 
@@ -632,62 +529,9 @@ class DefaultPipeline:
         """
         Evaluate classifier on ONE graph sample and return per-node predictions (masked) + metrics.
         """
-        self.classifier.eval()
-        device = next(self.classifier.parameters()).device
-
-        g = graph.to(device)
-
-        # HeteroNN classifier expects (x_dict, edge_index_dict) for hetero graphs.
-        if hasattr(g, "x_dict") and hasattr(g, "edge_index_dict"):
-            logits = self.classifier(g.x_dict, g.edge_index_dict)
-            y = g[target_type].y
-            mask = getattr(g[target_type], f"{split}_mask")
-        else:
-            warnings.warn("Graph does not have x_dict and edge_index_dict attributes. Assuming homogeneous graph.")
-            # homogeneous fallback
-            logits = self.classifier(g)
-            y = g.y
-            mask = getattr(g, f"{split}_mask")
-
-        # labels might be one-hot
-        if y.dim() > 1 and y.size(-1) > 1:
-            y_true = y.argmax(dim=-1)
-        else:
-            y_true = y.view(-1)
-
-        pred = logits.argmax(dim=-1)
-        num_classes = int(logits.size(-1))
-
-        idx = mask.nonzero(as_tuple=False).view(-1)
-        num = int(idx.numel())
-        if num == 0:
-            correct = 0
-            acc = float("nan")
-        else:
-            correct = int((pred[idx] == y_true[idx]).sum().item())
-            acc = correct / num
-
-        # build confusion matrix for masked nodes
-        if num == 0:
-            confusion = torch.zeros((num_classes, num_classes), dtype=torch.long)
-        else:
-            flat = (y_true[idx] * num_classes + pred[idx]).to(torch.long)
-            confusion = torch.bincount(flat, minlength=num_classes * num_classes).view(num_classes, num_classes)
-
-        metrics = self._metrics_from_confusion(confusion, total_eval=num)
-
-        return {
-            "acc": acc,
-            "num_eval": num,
-            "num_correct": correct,
-            "num_classes": num_classes,
-            "confusion": confusion,
-            "metrics": metrics,
-            "y_true": y_true[idx].detach().cpu(),
-            "y_pred": pred[idx].detach().cpu(),
-            "logits": logits[idx].detach().cpu(),
-            "node_idx": idx.detach().cpu(),
-        }
+        res = self.classifier_engine.eval_on_graph(graph=graph, split=split, target_type=target_type)
+        res["metrics"] = self._metrics_from_confusion(res["confusion"], total_eval=res["num_eval"])
+        return res
 
     @staticmethod
     def _metrics_from_confusion(confusion: torch.Tensor, total_eval: int) -> Dict[str, float]:
@@ -778,33 +622,7 @@ class DefaultPipeline:
         }
     
     def train_classifier_vanilla_oneloop(self, data, weights=None):
-        device = self.device
-        target = self.target
-        
-        self.classifier.train()
-        self.classifier_optimizer.zero_grad()
-        
-        # 调用 HeteroGNN_classifier，传入字典格式的数据
-        logits = self.classifier(data.x_dict, data.edge_index_dict)
-        
-        # 提取目标节点的标签和掩码
-        labels = data[target].y
-        train_mask = data[target].train_mask
-        val_mask = data[target].val_mask
-        
-        # 计算训练损失
-        loss = self.classifier_criterion.compute(logits[train_mask], labels[train_mask])
-        loss.backward()
-        self.classifier_optimizer.step()
-
-        # 验证步骤
-        with torch.no_grad():
-            self.classifier.eval()
-            output = self.classifier(data.x_dict, data.edge_index_dict)
-            val_loss = self.classifier_criterion.compute(output[val_mask], labels[val_mask])
-        self.classifier_optimizer.step()
-        self.cl_scheduler.step(val_loss)
-        return loss.item(), val_loss.item()
+        return self.classifier_engine.train_oneloop(data)
     
     def train_classifier_vanilla(
         self,

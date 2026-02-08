@@ -28,6 +28,13 @@ class MLP(nn.Module):
         out = self.fc(h)
         return out
 
+    def reset_parameters(self):
+        for m in self.modules():
+            if m is self:
+                continue
+            if hasattr(m, "reset_parameters"):
+                m.reset_parameters()
+
 class res_MLP(nn.Module):
     """
     一个残差连接MLP模型

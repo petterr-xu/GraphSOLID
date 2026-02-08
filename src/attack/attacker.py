@@ -4,7 +4,6 @@ import numpy as np
 import random
 import copy
 import torch.nn as nn
-import torch.nn.functional as F
 from tqdm import tqdm
 import tensorflow as tf
 import scipy.sparse as sp
@@ -12,6 +11,7 @@ from typing import Optional, Tuple
 from torch_geometric.data import Data, HeteroData
 
 from src.utils import graphbuilder
+from src.models.classifier_engine import MintaSurrogateEngine, MetaSurrogateEngine
 from ..dataset.abstract_dataset import AbstractDataModule
 from src.gnn_meta_attack.metattack import meta_gradient_attack as mtk, utils
 
@@ -464,7 +464,16 @@ class RandomAttacker(Attacker):
         return out
 
 class Metattacker(Attacker):
-    def __init__(self, dataset_module:AbstractDataModule, perturb_ratio, attack_varient='Meta-Self', re_trainings=5, device=0, train_iters = 200):
+    def __init__(
+        self,
+        dataset_module: AbstractDataModule,
+        perturb_ratio,
+        attack_varient='Meta-Self',
+        re_trainings=5,
+        device=0,
+        train_iters=200,
+        surrogate_engine: Optional[MetaSurrogateEngine] = None,
+    ):
         super().__init__(dataset_module)
         self.GPU_ID = device
         self.share_perturbations = perturb_ratio
@@ -473,6 +482,9 @@ class Metattacker(Attacker):
         self.dtype = tf.float32
         self.ENFORCE_LL_CONSTRAINT = False
         self.attack_variant = attack_varient
+        self.surrogate_engine = surrogate_engine or MetaSurrogateEngine(
+            gpu_id=self.GPU_ID, hidden_sizes=[16], with_relu=False, train_iters=self.train_iters
+        )
 
     def attack(self, data):
         """
@@ -679,12 +691,11 @@ class Metattacker(Attacker):
         """
         # 1. 初始化并训练代理GCN
         hidden_sizes = [16]
-        surrogate = mtk.GCNSparse(_A_obs, _X_obs, _Z_obs, hidden_sizes, gpu_id=self.GPU_ID)
-        surrogate.build(with_relu=False)
-        surrogate.train(split_train)
+        self.surrogate_engine.fit_matrices(_A_obs, _X_obs, _Z_obs, split_train)
 
         # 2. 自训练标签预测
-        labels_self_training = np.eye(_K)[surrogate.logits.eval(session=surrogate.session).argmax(1)]
+        surrogate_logits = self.surrogate_engine.logits()
+        labels_self_training = np.eye(_K)[surrogate_logits.argmax(1)]
         labels_self_training[split_train] = _Z_obs[split_train]
 
         # 3. 攻击参数配置
@@ -750,6 +761,7 @@ class MintaAttacker(Attacker):
         edge_types_for_A: Optional[list] = None,
         edge_type_to_perturb: Optional[Tuple[str, str, str]] = None,
         victim_model: Optional[nn.Module] = None,
+        surrogate_engine: Optional[MintaSurrogateEngine] = None,
         seed: Optional[int] = None,
         device: Optional[str] = None,
     ):
@@ -764,25 +776,9 @@ class MintaAttacker(Attacker):
         self.edge_types_for_A = edge_types_for_A
         self.edge_type_to_perturb = edge_type_to_perturb
         self.victim_model = victim_model
+        self.surrogate_engine = surrogate_engine
         self.seed = seed
         self.device = device
-
-    class _SurrogateGCN(nn.Module):
-        def __init__(self, nfeat: int, nhid: int, nclass: int):
-            super().__init__()
-            # weight shapes: (nfeat, nhid) and (nhid, nclass) to match MintA math
-            self.gc1 = nn.Parameter(torch.empty(nfeat, nhid))
-            self.gc2 = nn.Parameter(torch.empty(nhid, nclass))
-            nn.init.xavier_uniform_(self.gc1)
-            nn.init.xavier_uniform_(self.gc2)
-
-        def forward(self, x: torch.Tensor, adj_norm: torch.Tensor) -> torch.Tensor:
-            h = adj_norm @ x
-            h = h @ self.gc1
-            h = F.relu(h)
-            h = adj_norm @ h
-            out = h @ self.gc2
-            return out
 
     @staticmethod
     def _largest_indices(ary: np.ndarray, n: int):
@@ -884,38 +880,6 @@ class MintaAttacker(Attacker):
             A[src_m[mask], dst_m[mask]] = 1
 
         return A
-
-    def _train_surrogate(
-        self,
-        features: torch.Tensor,
-        adj: np.ndarray,
-        labels: torch.Tensor,
-        device: torch.device,
-    ) -> nn.Module:
-        n_nodes, n_feat = features.shape
-        nclass = int(labels.max().item()) + 1
-        surrogate = self._SurrogateGCN(n_feat, self.surrogate_hidden, nclass).to(device)
-
-        A = torch.tensor(adj, dtype=torch.float, device=device)
-        A = A + torch.eye(n_nodes, device=device)
-        deg = A.sum(dim=1)
-        deg_inv_sqrt = deg.pow(-0.5)
-        deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0.0
-        A_norm = deg_inv_sqrt.view(-1, 1) * A * deg_inv_sqrt.view(1, -1)
-
-        optimizer = torch.optim.Adam(surrogate.parameters(), lr=self.surrogate_lr)
-        features = features.to(device)
-        labels = labels.to(device)
-
-        for _ in range(self.surrogate_epochs):
-            surrogate.train()
-            optimizer.zero_grad()
-            out = surrogate(features, A_norm)
-            loss = F.cross_entropy(out, labels)
-            loss.backward()
-            optimizer.step()
-
-        return surrogate
 
     def _feat_perturb(
         self,
@@ -1054,7 +1018,26 @@ class MintaAttacker(Attacker):
         else:
             labels_sur = out[target].y[adv_nodes_train]
 
-        surrogate = self._train_surrogate(features_sur, A_sur, labels_sur, device=device)
+        num_classes = int(labels_sur.max().item()) + 1 if labels_sur.numel() > 0 else 2
+        if self.surrogate_engine is None:
+            self.surrogate_engine = MintaSurrogateEngine(
+                input_dim=int(features_sur.size(1)),
+                hidden_dim=self.surrogate_hidden,
+                num_classes=max(2, num_classes),
+                target_node=target,
+                edge_types_for_adj=edge_types_for_A,
+                lr=self.surrogate_lr,
+                epochs=self.surrogate_epochs,
+                device=str(device),
+            )
+        else:
+            # Keep engine aligned with current target/relation selection.
+            self.surrogate_engine.target_node = target
+            self.surrogate_engine.edge_types_for_adj = edge_types_for_A
+            self.surrogate_engine.to(str(device))
+
+        self.surrogate_engine.fit_dense(features_sur, A_sur, labels_sur, epochs=self.surrogate_epochs)
+        surrogate = self.surrogate_engine.model
 
         # 4) Predictions for adversarial nodes (victim if available, else ground-truth)
         if self.victim_model is not None:

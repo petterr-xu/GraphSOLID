@@ -51,6 +51,15 @@ class HeteroSAGE(torch.nn.Module):
                 layer = layer + 1
         return x_dict
 
+    def reset_parameters(self):
+        for conv in self.convs:
+            if hasattr(conv, "reset_parameters"):
+                conv.reset_parameters()
+        if hasattr(self.act, "reset_parameters"):
+            self.act.reset_parameters()
+        if hasattr(self.bn, "reset_parameters"):
+            self.bn.reset_parameters()
+
 
 class HeteroGAT(torch.nn.Module):
 
@@ -80,6 +89,15 @@ class HeteroGAT(torch.nn.Module):
                 layer += 1  
         return x_dict
 
+    def reset_parameters(self):
+        for conv in self.convs:
+            if hasattr(conv, "reset_parameters"):
+                conv.reset_parameters()
+        if hasattr(self.act, "reset_parameters"):
+            self.act.reset_parameters()
+        if hasattr(self.bn, "reset_parameters"):
+            self.bn.reset_parameters()
+
 class RGCN(nn.Module):
     def __init__(self, metadata, hidden_channels, num_layers):
         super(RGCN, self).__init__()
@@ -106,6 +124,15 @@ class RGCN(nn.Module):
                     x_dict[item] = self.bn(x_dict[item])
                 layer += 1  
         return x_dict
+
+    def reset_parameters(self):
+        for conv in self.convs:
+            if hasattr(conv, "reset_parameters"):
+                conv.reset_parameters()
+        if hasattr(self.act, "reset_parameters"):
+            self.act.reset_parameters()
+        if hasattr(self.bn, "reset_parameters"):
+            self.bn.reset_parameters()
 
 class HeteroGNN_classifier(nn.Module):
     def __init__(self, net, target_node, metadata, nhid, nclass, nlayer=1, dropout=0.5):
@@ -154,3 +181,9 @@ class HeteroGNN_classifier(nn.Module):
         logits = self.classifier(target_emb)
         
         return logits
+
+    def reset_parameters(self):
+        if hasattr(self.gnn, "reset_parameters"):
+            self.gnn.reset_parameters()
+        if hasattr(self.classifier, "reset_parameters"):
+            self.classifier.reset_parameters()
