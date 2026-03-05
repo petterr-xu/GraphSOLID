@@ -5,7 +5,7 @@ import numpy as np
 from tqdm import tqdm
 import os.path as osp
 import torch.nn.functional as F
-from torch_geometric.utils import subgraph, k_hop_subgraph
+from torch_geometric.utils import subgraph, k_hop_subgraph, to_undirected
 from torch_geometric.transforms import RandomNodeSplit
 from torch_geometric.data import InMemoryDataset, Dataset, HeteroData, Data
 from torch_geometric.loader import ClusterData, ClusterLoader, HGTLoader
@@ -51,6 +51,13 @@ class YelpChiMultiviewDataset(Dataset):
             
             for v_idx, mp in enumerate(self.metapaths):
                 view_data = extract_view_by_transform(h_sub, mp, self.target)
+
+                # DiGress expects symmetric adjacency; ensure every edge has its reverse.
+                if view_data.edge_index is not None and view_data.edge_index.numel() > 0:
+                    view_data.edge_index = to_undirected(
+                        view_data.edge_index,
+                        num_nodes=view_data.num_nodes
+                    )
                 
                 # 特征处理（保持你原有的逻辑）
                 if hasattr(view_data, 'y') and view_data.y is not None:

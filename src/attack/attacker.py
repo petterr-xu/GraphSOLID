@@ -7,7 +7,7 @@ import torch.nn as nn
 from tqdm import tqdm
 import tensorflow as tf
 import scipy.sparse as sp
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from torch_geometric.data import Data, HeteroData
 
 from src.utils import graphbuilder
@@ -757,6 +757,7 @@ class MintaAttacker(Attacker):
         surrogate_hidden: int = 64,
         surrogate_epochs: int = 50,
         surrogate_lr: float = 0.01,
+        enable_feature_perturb: bool = True,
         target_node_type: Optional[str] = None,
         edge_types_for_A: Optional[list] = None,
         edge_type_to_perturb: Optional[Tuple[str, str, str]] = None,
@@ -772,6 +773,7 @@ class MintaAttacker(Attacker):
         self.surrogate_hidden = int(surrogate_hidden)
         self.surrogate_epochs = int(surrogate_epochs)
         self.surrogate_lr = float(surrogate_lr)
+        self.enable_feature_perturb = bool(enable_feature_perturb)
         self.target_node_type = target_node_type
         self.edge_types_for_A = edge_types_for_A
         self.edge_type_to_perturb = edge_type_to_perturb
@@ -779,6 +781,7 @@ class MintaAttacker(Attacker):
         self.surrogate_engine = surrogate_engine
         self.seed = seed
         self.device = device
+        self.last_attack_info: Dict[str, Any] = {}
 
     @staticmethod
     def _largest_indices(ary: np.ndarray, n: int):
@@ -1051,15 +1054,30 @@ class MintaAttacker(Attacker):
         # 5) Determine number of perturbations
         val = max(1, int(self.perturb_ratio * len(adv_nodes_test)))
 
-        # 6) Feature perturbation
+        # 6) Optional feature perturbation (can be disabled for structure-only MintA)
         x = out[target].x
-        x2 = self._feat_perturb(x, A_adv, surrogate, val, adv_nodes_test, preds_adv)
-        out[target].x = x2
+        if self.enable_feature_perturb:
+            x2 = self._feat_perturb(x, A_adv, surrogate, val, adv_nodes_test, preds_adv)
+            out[target].x = x2
 
         # 7) Adjacency perturbation (apex relation by default)
         edge_index = out[edge_type_to_perturb].edge_index
         new_edge_index = self._adj_perturb_sim_apex(edge_index, x, A_adv, surrogate, val, adv_nodes_test)
         out[edge_type_to_perturb].edge_index = new_edge_index
+
+        # Expose targeted nodes for evasion metrics (ASR/NFR-style evaluation in pipeline).
+        adv_nodes_tensor = torch.as_tensor(adv_nodes_test, dtype=torch.long).view(-1).cpu()
+        out.attack_target_nodes = adv_nodes_tensor
+        out.attack_target_type = target
+        out.minta_adv_nodes = adv_nodes_tensor
+        out.minta_target_type = target
+        self.last_attack_info = {
+            "attack_name": "minta",
+            "target_type": target,
+            "adv_nodes": adv_nodes_tensor.clone(),
+            "num_adv_nodes": int(adv_nodes_tensor.numel()),
+            "enable_feature_perturb": bool(self.enable_feature_perturb),
+        }
 
         return out
 
