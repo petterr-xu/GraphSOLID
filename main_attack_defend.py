@@ -13,15 +13,13 @@ from omegaconf import DictConfig
 from matplotlib import pyplot as plt
 
 from src import loss_fn
-from src.models import HeteroNN
+from src.models import HeteroNN, classifier_engine
 from src.attack.attacker import Metattacker, RandomAttacker, MintaAttacker
 from src.attack.pipeline import DefaultPipeline
+from src.attack.surrogate_pipeline import SurrogateAttackPipeline
 from src.attack.defender import DiffusionPurifyDefender
 from src.utils import VNG_utils, graphbuilder
-from src.nettack.nettack import nettack as ntk
 from src.utils.hetero_dataset_util import GraphDataLoader
-from src.gnn_meta_attack.metattack import utils as metattack_utils
-from src.gnn_meta_attack.metattack import meta_gradient_attack as mtk
 from src.DiGress.src import utils as digress_utils
 from src.DiGress.src.diffusion_model_discrete import DiscreteDenoisingDiffusion 
 tf.get_logger().setLevel("ERROR")
@@ -121,7 +119,7 @@ def main(cfg: DictConfig):
         raise NotImplementedError("Unknown dataset {}".format(cfg["dataset"]))
 
     digress_utils.create_folders(cfg)
-    path = '/root/autodl-tmp/outputs/2026-01-26/16-51-37-graph-tf-model/checkpoints/graph-tf-model/last-v1.ckpt'
+    path = '/root/autodl-tmp/outputs/curr/graph-tf-model/checkpoints/graph-tf-model/last-v1.ckpt'
     model = DiscreteDenoisingDiffusion.load_from_checkpoint(path, **model_kwargs)
     
     gpu = cfg.general.gpus
@@ -162,6 +160,9 @@ def main(cfg: DictConfig):
                                cl_scheduler=cl_scheduler,
                                target=cfg.dataset.target, 
                                device=device)
+    classifier_eg = classifier_engine.MintaSurrogateEngine(input_dim=cfg.general.feat_dim,hidden_dim=cfg.general.feat_dim,nclass=nclass,target_node=cfg.dataset.target,device=device).to(device)
+    minta_pipeline = SurrogateAttackPipeline(dataset_module=datamodule,attacker=attacker, classifier_engine=classifier_eg, defender=diffusionDefender, device=device)
+    minta_pipeline.run()
     result = pipeline.defend_after_attack(split='test')
     print(result['metrics'])
 
