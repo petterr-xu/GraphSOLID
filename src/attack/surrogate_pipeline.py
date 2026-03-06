@@ -116,6 +116,262 @@ class SurrogateAttackPipeline:
             "macro_f1": macro_f1,
         }
 
+    @staticmethod
+    def _extract_attack_target_info(graph, default_target_type: str):
+        target_type = default_target_type
+        for attr in ["attack_target_type", "minta_target_type"]:
+            if hasattr(graph, attr):
+                v = getattr(graph, attr)
+                if isinstance(v, str) and len(v) > 0:
+                    target_type = v
+                    break
+
+        nodes = None
+        for attr in ["attack_target_nodes", "minta_adv_nodes", "adv_nodes_test"]:
+            if hasattr(graph, attr):
+                nodes = getattr(graph, attr)
+                break
+
+        if nodes is None:
+            return None, target_type
+
+        if isinstance(nodes, torch.Tensor):
+            node_tensor = nodes.detach().to(torch.long).view(-1).cpu()
+        else:
+            node_tensor = torch.as_tensor(nodes, dtype=torch.long).view(-1).cpu()
+
+        if node_tensor.numel() == 0:
+            return None, target_type
+
+        node_tensor = torch.unique(node_tensor, sorted=False)
+        return node_tensor, target_type
+
+    @staticmethod
+    def _build_pred_map(eval_res: Dict[str, Any]) -> Dict[int, int]:
+        idx = eval_res["node_idx"].detach().to(torch.long).view(-1).cpu()
+        pred = eval_res["y_pred"].detach().to(torch.long).view(-1).cpu()
+        return {int(i.item()): int(p.item()) for i, p in zip(idx, pred)}
+
+    @staticmethod
+    def _build_true_map(eval_res: Dict[str, Any]) -> Dict[int, int]:
+        idx = eval_res["node_idx"].detach().to(torch.long).view(-1).cpu()
+        y_true = eval_res["y_true"].detach().to(torch.long).view(-1).cpu()
+        return {int(i.item()): int(t.item()) for i, t in zip(idx, y_true)}
+
+    @classmethod
+    def _compute_transition_metrics_on_targets(
+        cls,
+        baseline_res: Dict[str, Any],
+        variant_res: Dict[str, Any],
+        attack_nodes: Optional[torch.Tensor],
+        positive_label: int = 1,
+    ) -> Dict[str, Any]:
+        empty = {
+            "target_eval_count": 0,
+            "num_true_pos": 0,
+            "num_true_pos_undetected_after": 0,
+            "num_clean_pos": 0,
+            "num_clean_neg": 0,
+            "num_pos_to_neg": 0,
+            "num_neg_to_pos": 0,
+            "asr_good": float("nan"),
+            "asr_bad": float("nan"),
+            "asr_post": float("nan"),
+            "nfr": float("nan"),
+        }
+        if attack_nodes is None or attack_nodes.numel() == 0:
+            return empty
+
+        base_map = cls._build_pred_map(baseline_res)
+        var_map = cls._build_pred_map(variant_res)
+        true_map = cls._build_true_map(baseline_res)
+        common_nodes = [
+            int(n)
+            for n in attack_nodes.tolist()
+            if (int(n) in base_map and int(n) in var_map and int(n) in true_map)
+        ]
+        if len(common_nodes) == 0:
+            return empty
+
+        base_pred = torch.tensor([base_map[n] for n in common_nodes], dtype=torch.long)
+        var_pred = torch.tensor([var_map[n] for n in common_nodes], dtype=torch.long)
+        y_true = torch.tensor([true_map[n] for n in common_nodes], dtype=torch.long)
+
+        clean_pos = base_pred == int(positive_label)
+        clean_neg = ~clean_pos
+
+        num_clean_pos = int(clean_pos.sum().item())
+        num_clean_neg = int(clean_neg.sum().item())
+        num_pos_to_neg = int((clean_pos & (var_pred != int(positive_label))).sum().item())
+        num_neg_to_pos = int((clean_neg & (var_pred == int(positive_label))).sum().item())
+
+        asr_good = float("nan") if num_clean_pos == 0 else (num_pos_to_neg / num_clean_pos)
+        asr_bad = float("nan") if num_clean_neg == 0 else (num_neg_to_pos / num_clean_neg)
+
+        true_pos = y_true == int(positive_label)
+        num_true_pos = int(true_pos.sum().item())
+        num_true_pos_undetected_after = int((true_pos & (var_pred != int(positive_label))).sum().item())
+        asr_post = float("nan") if num_true_pos == 0 else (num_true_pos_undetected_after / num_true_pos)
+
+        return {
+            "target_eval_count": len(common_nodes),
+            "num_true_pos": num_true_pos,
+            "num_true_pos_undetected_after": num_true_pos_undetected_after,
+            "num_clean_pos": num_clean_pos,
+            "num_clean_neg": num_clean_neg,
+            "num_pos_to_neg": num_pos_to_neg,
+            "num_neg_to_pos": num_neg_to_pos,
+            "asr_good": asr_good,
+            "asr_bad": asr_bad,
+            "asr_post": asr_post,
+            "nfr": asr_bad,
+        }
+
+    @classmethod
+    def _compute_defense_recovery_on_targets(
+        cls,
+        clean_res: Dict[str, Any],
+        attacked_res: Dict[str, Any],
+        defended_res: Dict[str, Any],
+        attack_nodes: Optional[torch.Tensor],
+        positive_label: int = 1,
+    ) -> Dict[str, Any]:
+        empty = {
+            "target_eval_count": 0,
+            "attack_success_pos": 0,
+            "attack_success_pos_recovered": 0,
+            "recovery_rate_pos": float("nan"),
+        }
+        if attack_nodes is None or attack_nodes.numel() == 0:
+            return empty
+
+        clean_map = cls._build_pred_map(clean_res)
+        attacked_map = cls._build_pred_map(attacked_res)
+        defended_map = cls._build_pred_map(defended_res)
+        common_nodes = [
+            int(n)
+            for n in attack_nodes.tolist()
+            if (int(n) in clean_map and int(n) in attacked_map and int(n) in defended_map)
+        ]
+        if len(common_nodes) == 0:
+            return empty
+
+        clean_pred = torch.tensor([clean_map[n] for n in common_nodes], dtype=torch.long)
+        attacked_pred = torch.tensor([attacked_map[n] for n in common_nodes], dtype=torch.long)
+        defended_pred = torch.tensor([defended_map[n] for n in common_nodes], dtype=torch.long)
+
+        attack_success = (clean_pred == int(positive_label)) & (attacked_pred != int(positive_label))
+        recovered = attack_success & (defended_pred == int(positive_label))
+
+        attack_success_pos = int(attack_success.sum().item())
+        attack_success_pos_recovered = int(recovered.sum().item())
+        recovery_rate_pos = (
+            float("nan")
+            if attack_success_pos == 0
+            else (attack_success_pos_recovered / attack_success_pos)
+        )
+        return {
+            "target_eval_count": len(common_nodes),
+            "attack_success_pos": attack_success_pos,
+            "attack_success_pos_recovered": attack_success_pos_recovered,
+            "recovery_rate_pos": recovery_rate_pos,
+        }
+
+    @staticmethod
+    def _init_target_totals() -> Dict[str, float]:
+        return {
+            "samples_with_targets": 0,
+            "target_eval_count": 0,
+            "num_true_pos": 0,
+            "num_true_pos_undetected_after": 0,
+            "num_clean_pos": 0,
+            "num_clean_neg": 0,
+            "num_pos_to_neg": 0,
+            "num_neg_to_pos": 0,
+        }
+
+    @staticmethod
+    def _accumulate_target_totals(
+        totals: Dict[str, float],
+        sample_metrics: Optional[Dict[str, Any]],
+    ) -> None:
+        if sample_metrics is None:
+            return
+        cnt = int(sample_metrics.get("target_eval_count", 0))
+        if cnt <= 0:
+            return
+        totals["samples_with_targets"] += 1
+        totals["target_eval_count"] += cnt
+        totals["num_true_pos"] += int(sample_metrics.get("num_true_pos", 0))
+        totals["num_true_pos_undetected_after"] += int(sample_metrics.get("num_true_pos_undetected_after", 0))
+        totals["num_clean_pos"] += int(sample_metrics.get("num_clean_pos", 0))
+        totals["num_clean_neg"] += int(sample_metrics.get("num_clean_neg", 0))
+        totals["num_pos_to_neg"] += int(sample_metrics.get("num_pos_to_neg", 0))
+        totals["num_neg_to_pos"] += int(sample_metrics.get("num_neg_to_pos", 0))
+
+    @staticmethod
+    def _finalize_target_totals(totals: Dict[str, float]) -> Dict[str, Any]:
+        pos = int(totals["num_clean_pos"])
+        neg = int(totals["num_clean_neg"])
+        pos_to_neg = int(totals["num_pos_to_neg"])
+        neg_to_pos = int(totals["num_neg_to_pos"])
+        asr_good = float("nan") if pos == 0 else (pos_to_neg / pos)
+        asr_bad = float("nan") if neg == 0 else (neg_to_pos / neg)
+        true_pos = int(totals["num_true_pos"])
+        true_pos_undetected_after = int(totals["num_true_pos_undetected_after"])
+        asr_post = float("nan") if true_pos == 0 else (true_pos_undetected_after / true_pos)
+        return {
+            "samples_with_targets": int(totals["samples_with_targets"]),
+            "target_eval_count": int(totals["target_eval_count"]),
+            "num_true_pos": true_pos,
+            "num_true_pos_undetected_after": true_pos_undetected_after,
+            "num_clean_pos": pos,
+            "num_clean_neg": neg,
+            "num_pos_to_neg": pos_to_neg,
+            "num_neg_to_pos": neg_to_pos,
+            "asr_good": asr_good,
+            "asr_bad": asr_bad,
+            "asr_post": asr_post,
+            "nfr": asr_bad,
+        }
+
+    @staticmethod
+    def _init_recovery_totals() -> Dict[str, float]:
+        return {
+            "samples_with_targets": 0,
+            "target_eval_count": 0,
+            "attack_success_pos": 0,
+            "attack_success_pos_recovered": 0,
+        }
+
+    @staticmethod
+    def _accumulate_recovery_totals(
+        totals: Dict[str, float],
+        sample_metrics: Optional[Dict[str, Any]],
+    ) -> None:
+        if sample_metrics is None:
+            return
+        cnt = int(sample_metrics.get("target_eval_count", 0))
+        if cnt <= 0:
+            return
+        totals["samples_with_targets"] += 1
+        totals["target_eval_count"] += cnt
+        totals["attack_success_pos"] += int(sample_metrics.get("attack_success_pos", 0))
+        totals["attack_success_pos_recovered"] += int(sample_metrics.get("attack_success_pos_recovered", 0))
+
+    @staticmethod
+    def _finalize_recovery_totals(totals: Dict[str, float]) -> Dict[str, Any]:
+        atk_success = int(totals["attack_success_pos"])
+        atk_recovered = int(totals["attack_success_pos_recovered"])
+        recovery_rate = float("nan") if atk_success == 0 else (atk_recovered / atk_success)
+        return {
+            "samples_with_targets": int(totals["samples_with_targets"]),
+            "target_eval_count": int(totals["target_eval_count"]),
+            "attack_success_pos": atk_success,
+            "attack_success_pos_recovered": atk_recovered,
+            "recovery_rate_pos": recovery_rate,
+        }
+
     def _train_engine(self, dataset, epochs: int, shuffle: bool, stage_name: str):
         history: List[Dict[str, float]] = []
         for epoch in tqdm(range(epochs), desc=f"Train {stage_name}"):
@@ -156,6 +412,10 @@ class SurrogateAttackPipeline:
                     "acc": res["acc"],
                     "num_eval": res["num_eval"],
                     "num_correct": res["num_correct"],
+                    "y_true": res["y_true"],
+                    "y_pred": res["y_pred"],
+                    "logits": res["logits"],
+                    "node_idx": res["node_idx"],
                 }
             )
         if confusion is None:
@@ -177,6 +437,7 @@ class SurrogateAttackPipeline:
         log_every: int = 1,
         eval_split: str = "test",
         include_defended: Optional[bool] = None,
+        positive_label: int = 1,
     ) -> Dict[str, Any]:
         ds = self._get_split_dataset(split)
         sample0 = ds[0] if len(ds) > 0 else None
@@ -217,6 +478,56 @@ class SurrogateAttackPipeline:
         poison_result = _run_stage("poisoned", poisoned_ds)
         defend_result = _run_stage("defended", defended_ds) if include_defended else None
 
+        poisoned_target_totals = self._init_target_totals()
+        defended_target_totals = self._init_target_totals()
+        recovery_totals = self._init_recovery_totals()
+
+        for i in range(len(poisoned_ds)):
+            clean_eval = clean_result["eval"]["per_sample"][i]
+            poison_eval = poison_result["eval"]["per_sample"][i]
+            attack_nodes, attack_target_type = self._extract_attack_target_info(
+                poisoned_ds[i], default_target_type=target_type
+            )
+
+            poisoned_target_metrics = None
+            if attack_nodes is not None and attack_target_type == target_type:
+                poisoned_target_metrics = self._compute_transition_metrics_on_targets(
+                    baseline_res=clean_eval,
+                    variant_res=poison_eval,
+                    attack_nodes=attack_nodes,
+                    positive_label=positive_label,
+                )
+                self._accumulate_target_totals(poisoned_target_totals, poisoned_target_metrics)
+            poison_eval["target_metrics"] = poisoned_target_metrics
+
+            if include_defended and defend_result is not None:
+                defend_eval = defend_result["eval"]["per_sample"][i]
+                defended_target_metrics = None
+                recovery_metrics = None
+                if attack_nodes is not None and attack_target_type == target_type:
+                    defended_target_metrics = self._compute_transition_metrics_on_targets(
+                        baseline_res=clean_eval,
+                        variant_res=defend_eval,
+                        attack_nodes=attack_nodes,
+                        positive_label=positive_label,
+                    )
+                    recovery_metrics = self._compute_defense_recovery_on_targets(
+                        clean_res=clean_eval,
+                        attacked_res=poison_eval,
+                        defended_res=defend_eval,
+                        attack_nodes=attack_nodes,
+                        positive_label=positive_label,
+                    )
+                    self._accumulate_target_totals(defended_target_totals, defended_target_metrics)
+                    self._accumulate_recovery_totals(recovery_totals, recovery_metrics)
+
+                defend_eval["target_metrics"] = defended_target_metrics
+                defend_eval["recovery_metrics"] = recovery_metrics
+
+        poisoned_target_summary = self._finalize_target_totals(poisoned_target_totals)
+        defended_target_summary = self._finalize_target_totals(defended_target_totals)
+        recovery_summary = self._finalize_recovery_totals(recovery_totals)
+
         summary: Dict[str, Any] = {
             "split": split,
             "eval_split": eval_split,
@@ -229,17 +540,43 @@ class SurrogateAttackPipeline:
                 "poisoned_macro_f1": poison_result["eval"]["metrics"]["macro_f1"],
                 "clean_total_eval": clean_result["eval"]["total_eval"],
                 "poisoned_total_eval": poison_result["eval"]["total_eval"],
+                "poisoned_target_eval_count": poisoned_target_summary["target_eval_count"],
+                "poisoned_target_samples": poisoned_target_summary["samples_with_targets"],
+                "poisoned_target_asr_good": poisoned_target_summary["asr_good"],
+                "poisoned_target_asr_bad": poisoned_target_summary["asr_bad"],
+                "poisoned_target_asr_post": poisoned_target_summary["asr_post"],
+                "poisoned_target_nfr": poisoned_target_summary["nfr"],
             },
             "details": {
                 "clean": clean_result,
-                "poisoned": poison_result,
+                "poisoned": {
+                    **poison_result,
+                    "target_summary": poisoned_target_summary,
+                },
             },
         }
         if include_defended and defend_result is not None:
             summary["metrics"]["defended_micro_acc"] = defend_result["eval"]["micro_acc"]
             summary["metrics"]["defended_macro_f1"] = defend_result["eval"]["metrics"]["macro_f1"]
             summary["metrics"]["defended_total_eval"] = defend_result["eval"]["total_eval"]
-            summary["details"]["defended"] = defend_result
+            summary["metrics"]["defended_target_eval_count"] = defended_target_summary["target_eval_count"]
+            summary["metrics"]["defended_target_samples"] = defended_target_summary["samples_with_targets"]
+            summary["metrics"]["defended_target_asr_good"] = defended_target_summary["asr_good"]
+            summary["metrics"]["defended_target_asr_bad"] = defended_target_summary["asr_bad"]
+            summary["metrics"]["defended_target_asr_post"] = defended_target_summary["asr_post"]
+            summary["metrics"]["defended_target_nfr"] = defended_target_summary["nfr"]
+            summary["metrics"]["defense_recovery_target_eval_count"] = recovery_summary["target_eval_count"]
+            summary["metrics"]["defense_recovery_target_samples"] = recovery_summary["samples_with_targets"]
+            summary["metrics"]["defense_recovery_attack_success_pos"] = recovery_summary["attack_success_pos"]
+            summary["metrics"]["defense_recovery_attack_success_pos_recovered"] = recovery_summary[
+                "attack_success_pos_recovered"
+            ]
+            summary["metrics"]["defense_recovery_rate_pos"] = recovery_summary["recovery_rate_pos"]
+            summary["details"]["defended"] = {
+                **defend_result,
+                "target_summary": defended_target_summary,
+                "recovery_summary": recovery_summary,
+            }
 
         out_dir = self._resolve_output_dir()
         tag = f"{split}_surrogate_poison_then_defend" if include_defended else f"{split}_surrogate_attack"
@@ -279,6 +616,7 @@ class SurrogateAttackPipeline:
         shuffle: bool = False,
         log_every: int = 1,
         eval_split: str = "test",
+        positive_label: int = 1,
     ) -> Dict[str, Any]:
         """
         Wrapper of run() for the standard clean/poisoned/defended flow.
@@ -290,4 +628,5 @@ class SurrogateAttackPipeline:
             log_every=log_every,
             eval_split=eval_split,
             include_defended=True,
+            positive_label=positive_label,
         )
