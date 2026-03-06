@@ -137,7 +137,14 @@ def main(cfg: DictConfig):
     elif cfg.general.attack_method == 'random':
         attacker = RandomAttacker(datamodule, perturb_ratio=cfg.general.perturb_ratio)
     elif cfg.general.attack_method == 'minta':
-        attacker = MintaAttacker(datamodule, perturb_ratio=cfg.general.perturb_ratio)
+        attacker = MintaAttacker(
+            datamodule,
+            perturb_ratio=cfg.general.perturb_ratio,
+            surrogate_epochs=int(getattr(cfg.general, "minta_surrogate_epochs", 50)),
+            surrogate_early_stop_patience=int(getattr(cfg.general, "minta_surrogate_patience", 10)),
+            surrogate_early_stop_min_delta=float(getattr(cfg.general, "minta_surrogate_min_delta", 1e-3)),
+            device=device,
+        )
     else:
         raise NotImplementedError("Unknown attack method {}".format(cfg.general.attack_method))
     diffusionDefender = DiffusionPurifyDefender(diffusion_steps=10, diffusion_model=model, metapaths=cfg.dataset.metapaths, target_node_type=cfg.dataset.target)
@@ -160,9 +167,26 @@ def main(cfg: DictConfig):
                                cl_scheduler=cl_scheduler,
                                target=cfg.dataset.target, 
                                device=device)
-    classifier_eg = classifier_engine.MintaSurrogateEngine(input_dim=cfg.general.feat_dim,hidden_dim=cfg.general.feat_dim,nclass=nclass,target_node=cfg.dataset.target,device=device).to(device)
+    input_dim = int(hetero_data.g[target].x.size(-1))
+    same_type_edge_types = [et for et in hetero_data.g.edge_types if et[0] == target and et[2] == target]
+    classifier_eg = classifier_engine.MintaSurrogateEngine(
+        input_dim=input_dim,
+        hidden_dim=cfg.general.feat_dim,
+        num_classes=nclass,
+        target_node=cfg.dataset.target,
+        edge_types_for_adj=same_type_edge_types,
+        device=device,
+    ).to(device)
     minta_pipeline = SurrogateAttackPipeline(dataset_module=datamodule,attacker=attacker, classifier_engine=classifier_eg, defender=diffusionDefender, device=device)
-    minta_pipeline.run()
+    minta_pipeline.evasion_then_defend(
+        split='test',
+        train_epochs=200,
+        eval_split='test',
+        log_every=int(getattr(cfg.general, "minta_log_every", 0)),
+        early_stop_patience=10,
+        early_stop_min_delta=1e-3,
+        train_log_interval=10,
+    )
     result = pipeline.defend_after_attack(split='test')
     print(result['metrics'])
 

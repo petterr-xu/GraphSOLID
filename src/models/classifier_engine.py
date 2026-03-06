@@ -278,7 +278,15 @@ class MintaSurrogateEngine(ClassifierEngine):
             return y.argmax(dim=-1).to(torch.long)
         return y.view(-1).to(torch.long)
 
-    def fit_dense(self, features: torch.Tensor, adj_dense, labels: torch.Tensor, epochs: Optional[int] = None):
+    def fit_dense(
+        self,
+        features: torch.Tensor,
+        adj_dense,
+        labels: torch.Tensor,
+        epochs: Optional[int] = None,
+        early_stop_patience: Optional[int] = None,
+        early_stop_min_delta: float = 0.0,
+    ):
         if isinstance(adj_dense, np.ndarray):
             adj_dense = torch.tensor(adj_dense, dtype=torch.float, device=self.device)
         elif not torch.is_tensor(adj_dense):
@@ -291,6 +299,8 @@ class MintaSurrogateEngine(ClassifierEngine):
         adj_norm = self._normalize_adj(adj_dense)
 
         steps = self.epochs if epochs is None else int(epochs)
+        best_loss = float("inf")
+        bad_epochs = 0
         for _ in range(steps):
             self._model.train()
             self.optimizer.zero_grad()
@@ -298,6 +308,16 @@ class MintaSurrogateEngine(ClassifierEngine):
             loss = self.criterion(out, y)
             loss.backward()
             self.optimizer.step()
+
+            if early_stop_patience is not None and int(early_stop_patience) > 0:
+                loss_v = float(loss.detach().item())
+                if (best_loss - loss_v) > float(early_stop_min_delta):
+                    best_loss = loss_v
+                    bad_epochs = 0
+                else:
+                    bad_epochs += 1
+                    if bad_epochs >= int(early_stop_patience):
+                        break
 
     @torch.no_grad()
     def predict_dense(self, features: torch.Tensor, adj_dense) -> torch.Tensor:

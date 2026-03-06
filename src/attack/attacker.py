@@ -762,9 +762,12 @@ class MintaAttacker(Attacker):
         edge_types_for_A: Optional[list] = None,
         edge_type_to_perturb: Optional[Tuple[str, str, str]] = None,
         victim_model: Optional[nn.Module] = None,
+        victim_engine: Optional[Any] = None,
         surrogate_engine: Optional[MintaSurrogateEngine] = None,
         seed: Optional[int] = None,
         device: Optional[str] = None,
+        surrogate_early_stop_patience: Optional[int] = None,
+        surrogate_early_stop_min_delta: float = 0.0,
     ):
         super().__init__(dataset_module)
         self.perturb_ratio = float(perturb_ratio)
@@ -778,9 +781,12 @@ class MintaAttacker(Attacker):
         self.edge_types_for_A = edge_types_for_A
         self.edge_type_to_perturb = edge_type_to_perturb
         self.victim_model = victim_model
+        self.victim_engine = victim_engine
         self.surrogate_engine = surrogate_engine
         self.seed = seed
         self.device = device
+        self.surrogate_early_stop_patience = surrogate_early_stop_patience
+        self.surrogate_early_stop_min_delta = float(surrogate_early_stop_min_delta)
         self.last_attack_info: Dict[str, Any] = {}
 
     @staticmethod
@@ -824,9 +830,70 @@ class MintaAttacker(Attacker):
             v = getattr(self.victim_model, "target_node")
             if isinstance(v, str) and v:
                 return v
+        if self.victim_engine is not None and hasattr(self.victim_engine, "target_node"):
+            v = getattr(self.victim_engine, "target_node")
+            if isinstance(v, str) and v:
+                return v
         if hasattr(data, "node_types") and len(data.node_types) == 1:
             return data.node_types[0]
         raise ValueError("[MintaAttacker] Cannot infer target node type. Please set target_node_type.")
+
+    def _predict_nodes_with_victim(self, data: HeteroData, target: str, node_indices: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Return predicted classes for target-node indices using victim_model or victim_engine.
+        """
+        if node_indices is None or len(node_indices) == 0:
+            return np.array([], dtype=np.int64)
+        node_indices = np.asarray(node_indices, dtype=np.int64)
+
+        if self.victim_model is not None:
+            try:
+                self.victim_model.eval()
+                with torch.no_grad():
+                    try:
+                        pred_raw = self.victim_model(data.x_dict, data.edge_index_dict)
+                    except Exception:
+                        pred_raw = self.victim_model(data)
+                    if isinstance(pred_raw, dict):
+                        if target in pred_raw:
+                            pred_raw = pred_raw[target]
+                        elif len(pred_raw) == 1:
+                            pred_raw = next(iter(pred_raw.values()))
+                        else:
+                            raise TypeError(
+                                "[MintaAttacker] victim_model returned dict logits without target key."
+                            )
+                    pred = pred_raw.argmax(dim=-1)
+                return pred[node_indices].detach().cpu().numpy()
+            except Exception:
+                pass
+
+        if self.victim_engine is not None and hasattr(self.victim_engine, "eval_on_graph"):
+            pred_map: Dict[int, int] = {}
+            for split_name in ("train", "val", "test"):
+                try:
+                    res = self.victim_engine.eval_on_graph(data, split=split_name, target_type=target)
+                except Exception:
+                    continue
+                idx = res.get("node_idx")
+                y_pred = res.get("y_pred")
+                if idx is None or y_pred is None:
+                    continue
+                idx = idx.detach().to(torch.long).view(-1).cpu()
+                y_pred = y_pred.detach().to(torch.long).view(-1).cpu()
+                for n, p in zip(idx.tolist(), y_pred.tolist()):
+                    pred_map[int(n)] = int(p)
+            if len(pred_map) > 0:
+                out = np.full((len(node_indices),), -1, dtype=np.int64)
+                ok = 0
+                for i, n in enumerate(node_indices.tolist()):
+                    if int(n) in pred_map:
+                        out[i] = pred_map[int(n)]
+                        ok += 1
+                if ok > 0:
+                    return out
+
+        return None
 
     def _resolve_edge_types(self, data: HeteroData, target: str) -> Tuple[list, Tuple[str, str, str]]:
         edge_types_for_A = self.edge_types_for_A
@@ -1013,11 +1080,16 @@ class MintaAttacker(Attacker):
         A_sur = self._extract_A_adv(out, adv_nodes_train, edge_types_for_A, target)
         features_sur = out[target].x[adv_nodes_train].float()
 
-        if self.victim_model is not None:
-            self.victim_model.eval()
-            with torch.no_grad():
-                pred_raw = self.victim_model(out.x_dict, out.edge_index_dict)
-                labels_sur = pred_raw.argmax(dim=-1)[adv_nodes_train]
+        pred_train = self._predict_nodes_with_victim(out, target, adv_nodes_train)
+        if pred_train is not None:
+            mask_known = pred_train >= 0
+            if mask_known.all():
+                labels_sur = torch.from_numpy(pred_train).to(out[target].y.device, dtype=torch.long)
+            else:
+                labels_sur = out[target].y[adv_nodes_train].clone()
+                labels_sur[torch.from_numpy(mask_known).to(labels_sur.device)] = torch.from_numpy(
+                    pred_train[mask_known]
+                ).to(labels_sur.device, dtype=torch.long)
         else:
             labels_sur = out[target].y[adv_nodes_train]
 
@@ -1039,15 +1111,25 @@ class MintaAttacker(Attacker):
             self.surrogate_engine.edge_types_for_adj = edge_types_for_A
             self.surrogate_engine.to(str(device))
 
-        self.surrogate_engine.fit_dense(features_sur, A_sur, labels_sur, epochs=self.surrogate_epochs)
+        self.surrogate_engine.fit_dense(
+            features_sur,
+            A_sur,
+            labels_sur,
+            epochs=self.surrogate_epochs,
+            early_stop_patience=self.surrogate_early_stop_patience,
+            early_stop_min_delta=self.surrogate_early_stop_min_delta,
+        )
         surrogate = self.surrogate_engine.model
 
         # 4) Predictions for adversarial nodes (victim if available, else ground-truth)
-        if self.victim_model is not None:
-            self.victim_model.eval()
-            with torch.no_grad():
-                preds = self.victim_model(out.x_dict, out.edge_index_dict).argmax(dim=-1)
-            preds_adv = preds[adv_nodes_test].cpu().numpy()
+        pred_adv = self._predict_nodes_with_victim(out, target, adv_nodes_test)
+        if pred_adv is not None:
+            mask_known = pred_adv >= 0
+            if mask_known.all():
+                preds_adv = pred_adv
+            else:
+                preds_adv = out[target].y[adv_nodes_test].cpu().numpy()
+                preds_adv[mask_known] = pred_adv[mask_known]
         else:
             preds_adv = out[target].y[adv_nodes_test].cpu().numpy()
 

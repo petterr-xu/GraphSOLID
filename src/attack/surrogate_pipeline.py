@@ -372,13 +372,24 @@ class SurrogateAttackPipeline:
             "recovery_rate_pos": recovery_rate,
         }
 
-    def _train_engine(self, dataset, epochs: int, shuffle: bool, stage_name: str):
+    def _train_engine(
+        self,
+        dataset,
+        epochs: int,
+        shuffle: bool,
+        stage_name: str,
+        early_stop_patience: int = 10,
+        early_stop_min_delta: float = 1e-3,
+        log_interval: int = 10,
+    ):
         history: List[Dict[str, float]] = []
-        for epoch in tqdm(range(epochs), desc=f"Train {stage_name}"):
+        best_val = float("inf")
+        bad_epochs = 0
+        for epoch in range(epochs):
             order = torch.randperm(len(dataset)).tolist() if shuffle else list(range(len(dataset)))
             train_losses = []
             val_losses = []
-            for i in tqdm(order, desc=f"{stage_name} epoch {epoch + 1}/{epochs}", leave=False):
+            for i in order:
                 g = dataset[i]
                 g_in = g.clone() if hasattr(g, "clone") else g
                 if hasattr(g_in, "to"):
@@ -389,10 +400,23 @@ class SurrogateAttackPipeline:
             avg_train = float(sum(train_losses) / max(len(train_losses), 1))
             avg_val = float(sum(val_losses) / max(len(val_losses), 1))
             history.append({"epoch": epoch + 1, "train_loss": avg_train, "val_loss": avg_val})
-            tqdm.write(
-                f"[surrogate:{stage_name}] epoch={epoch + 1}/{epochs} | "
-                f"train_loss={avg_train:.6f} | val_loss={avg_val:.6f}"
-            )
+            if ((epoch + 1) % log_interval == 0) or epoch == 0 or (epoch + 1) == epochs:
+                print(
+                    f"[surrogate:{stage_name}] epoch={epoch + 1}/{epochs} "
+                    f"train={avg_train:.4f} val={avg_val:.4f}"
+                )
+
+            if (best_val - avg_val) > early_stop_min_delta:
+                best_val = avg_val
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+                if early_stop_patience > 0 and bad_epochs >= early_stop_patience:
+                    print(
+                        f"[surrogate:{stage_name}] early stop at epoch {epoch + 1} "
+                        f"(best_val={best_val:.4f})"
+                    )
+                    break
         return history
 
     def _eval_engine(self, dataset, target_type: str, eval_split: str = "test"):
@@ -448,6 +472,9 @@ class SurrogateAttackPipeline:
         eval_split: str = "test",
         include_defended: Optional[bool] = None,
         positive_label: int = 1,
+        early_stop_patience: int = 10,
+        early_stop_min_delta: float = 1e-3,
+        train_log_interval: int = 10,
     ) -> Dict[str, Any]:
         """
         MintA-aligned evaluation protocol:
@@ -470,11 +497,18 @@ class SurrogateAttackPipeline:
         if train_epochs > 0:
             train_ds = self._get_split_dataset(train_split)
             train_history = self._train_engine(
-                train_ds, epochs=train_epochs, shuffle=shuffle, stage_name=f"victim_{train_split}"
+                train_ds,
+                epochs=train_epochs,
+                shuffle=shuffle,
+                stage_name=f"victim_{train_split}",
+                early_stop_patience=early_stop_patience,
+                early_stop_min_delta=early_stop_min_delta,
+                log_interval=train_log_interval,
             )
 
         if isinstance(self.attacker, MintaAttacker):
             self.attacker.victim_model = self.classifier_engine.model
+            self.attacker.victim_engine = self.classifier_engine
             self.attacker.device = self.device
 
         total = len(ds)
@@ -751,6 +785,9 @@ class SurrogateAttackPipeline:
         positive_label: int = 1,
         protocol: str = "auto",
         train_split: str = "train",
+        early_stop_patience: int = 10,
+        early_stop_min_delta: float = 1e-3,
+        train_log_interval: int = 10,
     ) -> Dict[str, Any]:
         if protocol not in {"auto", "poison_train", "minta_evasion"}:
             raise ValueError(f"Unknown protocol '{protocol}'.")
@@ -766,6 +803,9 @@ class SurrogateAttackPipeline:
                 eval_split=eval_split,
                 include_defended=include_defended,
                 positive_label=positive_label,
+                early_stop_patience=early_stop_patience,
+                early_stop_min_delta=early_stop_min_delta,
+                train_log_interval=train_log_interval,
             )
 
         ds = self._get_split_dataset(split)
@@ -799,7 +839,15 @@ class SurrogateAttackPipeline:
 
         def _run_stage(stage_name: str, stage_ds):
             self.classifier_engine.reset_from_snapshot(init_state, prefer_reset_parameters=True)
-            history = self._train_engine(stage_ds, epochs=train_epochs, shuffle=shuffle, stage_name=stage_name)
+            history = self._train_engine(
+                stage_ds,
+                epochs=train_epochs,
+                shuffle=shuffle,
+                stage_name=stage_name,
+                early_stop_patience=early_stop_patience,
+                early_stop_min_delta=early_stop_min_delta,
+                log_interval=train_log_interval,
+            )
             result = self._eval_engine(stage_ds, target_type=target_type, eval_split=eval_split)
             return {"train_history": history, "eval": result}
 
@@ -946,6 +994,9 @@ class SurrogateAttackPipeline:
         log_every: int = 1,
         eval_split: str = "test",
         positive_label: int = 1,
+        early_stop_patience: int = 10,
+        early_stop_min_delta: float = 1e-3,
+        train_log_interval: int = 10,
     ) -> Dict[str, Any]:
         """
         Wrapper of run() for the standard clean/poisoned/defended flow.
@@ -959,6 +1010,9 @@ class SurrogateAttackPipeline:
             include_defended=True,
             positive_label=positive_label,
             protocol="poison_train",
+            early_stop_patience=early_stop_patience,
+            early_stop_min_delta=early_stop_min_delta,
+            train_log_interval=train_log_interval,
         )
 
     def minta_evasion(
@@ -971,6 +1025,9 @@ class SurrogateAttackPipeline:
         eval_split: str = "test",
         include_defended: Optional[bool] = True,
         positive_label: int = 1,
+        early_stop_patience: int = 10,
+        early_stop_min_delta: float = 1e-3,
+        train_log_interval: int = 10,
     ) -> Dict[str, Any]:
         """
         Wrapper for MintA-aligned evasion protocol.
@@ -985,4 +1042,37 @@ class SurrogateAttackPipeline:
             positive_label=positive_label,
             protocol="minta_evasion",
             train_split=train_split,
+            early_stop_patience=early_stop_patience,
+            early_stop_min_delta=early_stop_min_delta,
+            train_log_interval=train_log_interval,
+        )
+
+    def evasion_then_defend(
+        self,
+        split: str = "test",
+        train_split: str = "train",
+        train_epochs: int = 100,
+        shuffle: bool = False,
+        log_every: int = 1,
+        eval_split: str = "test",
+        positive_label: int = 1,
+        early_stop_patience: int = 10,
+        early_stop_min_delta: float = 1e-3,
+        train_log_interval: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        Backward-compatible alias for MintA evasion + defense evaluation.
+        """
+        return self.minta_evasion(
+            split=split,
+            train_split=train_split,
+            train_epochs=train_epochs,
+            shuffle=shuffle,
+            log_every=log_every,
+            eval_split=eval_split,
+            include_defended=True,
+            positive_label=positive_label,
+            early_stop_patience=early_stop_patience,
+            early_stop_min_delta=early_stop_min_delta,
+            train_log_interval=train_log_interval,
         )
