@@ -1065,6 +1065,19 @@ class MintaAttacker(Attacker):
         new_edge_index = self._adj_perturb_sim_apex(edge_index, x, A_adv, surrogate, val, adv_nodes_test)
         out[edge_type_to_perturb].edge_index = new_edge_index
 
+        # Attack diagnostics (helps validate that perturbations are actually applied).
+        num_target_nodes = int(out[target].num_nodes)
+        before_hash = edge_index[0].to(torch.long) * num_target_nodes + edge_index[1].to(torch.long)
+        after_hash = new_edge_index[0].to(torch.long) * num_target_nodes + new_edge_index[1].to(torch.long)
+        before_set = set(before_hash.detach().cpu().tolist())
+        after_set = set(after_hash.detach().cpu().tolist())
+        num_added_edges = len(after_set - before_set)
+        num_removed_edges = len(before_set - after_set)
+
+        feature_delta_l1 = float("nan")
+        if self.enable_feature_perturb:
+            feature_delta_l1 = float((out[target].x - x).abs().sum().item())
+
         # Expose targeted nodes for evasion metrics (ASR/NFR-style evaluation in pipeline).
         adv_nodes_tensor = torch.as_tensor(adv_nodes_test, dtype=torch.long).view(-1).cpu()
         out.attack_target_nodes = adv_nodes_tensor
@@ -1077,6 +1090,13 @@ class MintaAttacker(Attacker):
             "adv_nodes": adv_nodes_tensor.clone(),
             "num_adv_nodes": int(adv_nodes_tensor.numel()),
             "enable_feature_perturb": bool(self.enable_feature_perturb),
+            "perturb_budget_val": int(val),
+            "edge_type_to_perturb": edge_type_to_perturb,
+            "num_edges_before": int(edge_index.size(1)),
+            "num_edges_after": int(new_edge_index.size(1)),
+            "num_added_edges": int(num_added_edges),
+            "num_removed_edges": int(num_removed_edges),
+            "feature_delta_l1": feature_delta_l1,
         }
 
         return out

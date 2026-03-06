@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from src.dataset.abstract_dataset import AbstractDataModule
 from src.models.classifier_engine import ClassifierEngine
-from .attacker import Attacker
+from .attacker import Attacker, MintaAttacker
 from .defender import Defender
 
 
@@ -429,6 +429,317 @@ class SurrogateAttackPipeline:
             "per_sample": per_sample,
         }
 
+    @torch.no_grad()
+    def _eval_classifier_on_graph(self, graph, split: str, target_type: str) -> Dict[str, Any]:
+        """
+        Evaluate classifier on one graph sample (no retraining), with per-node records.
+        """
+        res = self.classifier_engine.eval_on_graph(graph=graph, split=split, target_type=target_type)
+        res["metrics"] = self._metrics_from_confusion(res["confusion"], total_eval=res["num_eval"])
+        return res
+
+    def _run_minta_evasion(
+        self,
+        split: str = "test",
+        train_split: str = "train",
+        train_epochs: int = 1,
+        shuffle: bool = False,
+        log_every: int = 1,
+        eval_split: str = "test",
+        include_defended: Optional[bool] = None,
+        positive_label: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        MintA-aligned evaluation protocol:
+        - Train ONE victim model on clean train split (optional if train_epochs=0),
+        - Keep victim fixed,
+        - Compare clean/attacked(/defended) predictions on the same model.
+        """
+        ds = self._get_split_dataset(split)
+        sample0 = ds[0] if len(ds) > 0 else None
+        if sample0 is None:
+            raise ValueError(f"Empty dataset for split='{split}'.")
+        target_type = self._infer_target_type(sample0)
+
+        if include_defended is None:
+            include_defended = self.defender is not None
+        if include_defended and self.defender is None:
+            raise ValueError("include_defended=True requires a defender, but defender is None.")
+
+        train_history: List[Dict[str, float]] = []
+        if train_epochs > 0:
+            train_ds = self._get_split_dataset(train_split)
+            train_history = self._train_engine(
+                train_ds, epochs=train_epochs, shuffle=shuffle, stage_name=f"victim_{train_split}"
+            )
+
+        if isinstance(self.attacker, MintaAttacker):
+            self.attacker.victim_model = self.classifier_engine.model
+            self.attacker.device = self.device
+
+        total = len(ds)
+        clean_total_eval = 0
+        clean_total_correct = 0
+        attacked_total_eval = 0
+        attacked_total_correct = 0
+        defended_total_eval = 0
+        defended_total_correct = 0
+
+        clean_confusion = None
+        attacked_confusion = None
+        defended_confusion = None
+
+        clean_per_sample: List[Dict[str, Any]] = []
+        attacked_per_sample: List[Dict[str, Any]] = []
+        defended_per_sample: List[Dict[str, Any]] = []
+        attacked_target_totals = self._init_target_totals()
+        defended_target_totals = self._init_target_totals()
+        recovery_totals = self._init_recovery_totals()
+
+        for i in tqdm(range(total), desc=f"Eval {split} (minta-evasion)"):
+            g = ds[i]
+
+            clean_res = self._eval_classifier_on_graph(g, split=eval_split, target_type=target_type)
+            clean_total_eval += clean_res["num_eval"]
+            clean_total_correct += clean_res["num_correct"]
+            clean_confusion = (
+                clean_res["confusion"].clone()
+                if clean_confusion is None
+                else clean_confusion + clean_res["confusion"]
+            )
+            clean_per_sample.append(
+                {
+                    "sample_id": i,
+                    "num_eval": clean_res["num_eval"],
+                    "num_correct": clean_res["num_correct"],
+                    "acc": clean_res["acc"],
+                    "metrics": clean_res["metrics"],
+                    "y_true": clean_res["y_true"],
+                    "y_pred": clean_res["y_pred"],
+                    "logits": clean_res["logits"],
+                    "node_idx": clean_res["node_idx"],
+                }
+            )
+
+            g_attacked = self.attacker.attack(g.clone() if hasattr(g, "clone") else g)
+            attacked_res = self._eval_classifier_on_graph(g_attacked, split=eval_split, target_type=target_type)
+            attack_info = getattr(self.attacker, "last_attack_info", None)
+            attacked_total_eval += attacked_res["num_eval"]
+            attacked_total_correct += attacked_res["num_correct"]
+            attacked_confusion = (
+                attacked_res["confusion"].clone()
+                if attacked_confusion is None
+                else attacked_confusion + attacked_res["confusion"]
+            )
+            attack_nodes, attack_target_type = self._extract_attack_target_info(
+                g_attacked, default_target_type=target_type
+            )
+            attacked_target_metrics = None
+            if attack_nodes is not None and attack_target_type == target_type:
+                attacked_target_metrics = self._compute_transition_metrics_on_targets(
+                    baseline_res=clean_res,
+                    variant_res=attacked_res,
+                    attack_nodes=attack_nodes,
+                    positive_label=positive_label,
+                )
+                self._accumulate_target_totals(attacked_target_totals, attacked_target_metrics)
+            attacked_per_sample.append(
+                {
+                    "sample_id": i,
+                    "num_eval": attacked_res["num_eval"],
+                    "num_correct": attacked_res["num_correct"],
+                    "acc": attacked_res["acc"],
+                    "metrics": attacked_res["metrics"],
+                    "y_true": attacked_res["y_true"],
+                    "y_pred": attacked_res["y_pred"],
+                    "logits": attacked_res["logits"],
+                    "node_idx": attacked_res["node_idx"],
+                    "target_metrics": attacked_target_metrics,
+                    "attack_info": attack_info,
+                }
+            )
+
+            if include_defended:
+                g_defended = self.defender.defend(
+                    g_attacked.clone() if hasattr(g_attacked, "clone") else g_attacked
+                )
+                defended_res = self._eval_classifier_on_graph(g_defended, split=eval_split, target_type=target_type)
+                defended_total_eval += defended_res["num_eval"]
+                defended_total_correct += defended_res["num_correct"]
+                defended_confusion = (
+                    defended_res["confusion"].clone()
+                    if defended_confusion is None
+                    else defended_confusion + defended_res["confusion"]
+                )
+                defended_target_metrics = None
+                recovery_metrics = None
+                if attack_nodes is not None and attack_target_type == target_type:
+                    defended_target_metrics = self._compute_transition_metrics_on_targets(
+                        baseline_res=clean_res,
+                        variant_res=defended_res,
+                        attack_nodes=attack_nodes,
+                        positive_label=positive_label,
+                    )
+                    recovery_metrics = self._compute_defense_recovery_on_targets(
+                        clean_res=clean_res,
+                        attacked_res=attacked_res,
+                        defended_res=defended_res,
+                        attack_nodes=attack_nodes,
+                        positive_label=positive_label,
+                    )
+                    self._accumulate_target_totals(defended_target_totals, defended_target_metrics)
+                    self._accumulate_recovery_totals(recovery_totals, recovery_metrics)
+                defended_per_sample.append(
+                    {
+                        "sample_id": i,
+                        "num_eval": defended_res["num_eval"],
+                        "num_correct": defended_res["num_correct"],
+                        "acc": defended_res["acc"],
+                        "metrics": defended_res["metrics"],
+                        "y_true": defended_res["y_true"],
+                        "y_pred": defended_res["y_pred"],
+                        "logits": defended_res["logits"],
+                        "node_idx": defended_res["node_idx"],
+                        "target_metrics": defended_target_metrics,
+                        "recovery_metrics": recovery_metrics,
+                    }
+                )
+
+            if log_every and (i + 1) % log_every == 0:
+                msg = (
+                    f"[minta_evasion {split} #{i + 1}/{total}] "
+                    f"clean={clean_res['acc']:.4f} attacked={attacked_res['acc']:.4f}"
+                )
+                if include_defended and len(defended_per_sample) > 0:
+                    msg += f" defended={defended_per_sample[-1]['acc']:.4f}"
+                print(msg)
+
+        clean_micro_acc = float("nan") if clean_total_eval == 0 else (clean_total_correct / clean_total_eval)
+        attacked_micro_acc = float("nan") if attacked_total_eval == 0 else (attacked_total_correct / attacked_total_eval)
+        defended_micro_acc = (
+            float("nan") if defended_total_eval == 0 else (defended_total_correct / defended_total_eval)
+        )
+
+        clean_metrics = self._metrics_from_confusion(clean_confusion, total_eval=clean_total_eval)
+        attacked_metrics = self._metrics_from_confusion(attacked_confusion, total_eval=attacked_total_eval)
+        defended_metrics = (
+            self._metrics_from_confusion(defended_confusion, total_eval=defended_total_eval)
+            if include_defended and defended_confusion is not None
+            else None
+        )
+
+        attacked_target_summary = self._finalize_target_totals(attacked_target_totals)
+        defended_target_summary = self._finalize_target_totals(defended_target_totals)
+        recovery_summary = self._finalize_recovery_totals(recovery_totals)
+
+        summary: Dict[str, Any] = {
+            "split": split,
+            "eval_split": eval_split,
+            "train_split": train_split,
+            "protocol": "minta_evasion",
+            "target_type": target_type,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "train_history": train_history,
+            "metrics": {
+                "clean_micro_acc": clean_micro_acc,
+                "attacked_micro_acc": attacked_micro_acc,
+                "clean_macro_f1": clean_metrics["macro_f1"],
+                "attacked_macro_f1": attacked_metrics["macro_f1"],
+                "clean_total_eval": int(clean_total_eval),
+                "attacked_total_eval": int(attacked_total_eval),
+                "attacked_target_eval_count": attacked_target_summary["target_eval_count"],
+                "attacked_target_samples": attacked_target_summary["samples_with_targets"],
+                "attacked_target_asr_good": attacked_target_summary["asr_good"],
+                "attacked_target_asr_bad": attacked_target_summary["asr_bad"],
+                "attacked_target_asr_post": attacked_target_summary["asr_post"],
+                "attacked_target_nfr": attacked_target_summary["nfr"],
+                # compatibility aliases
+                "poisoned_micro_acc": attacked_micro_acc,
+                "poisoned_macro_f1": attacked_metrics["macro_f1"],
+                "poisoned_total_eval": int(attacked_total_eval),
+                "poisoned_target_eval_count": attacked_target_summary["target_eval_count"],
+                "poisoned_target_samples": attacked_target_summary["samples_with_targets"],
+                "poisoned_target_asr_good": attacked_target_summary["asr_good"],
+                "poisoned_target_asr_bad": attacked_target_summary["asr_bad"],
+                "poisoned_target_asr_post": attacked_target_summary["asr_post"],
+                "poisoned_target_nfr": attacked_target_summary["nfr"],
+            },
+            "details": {
+                "clean": {
+                    "micro_acc": clean_micro_acc,
+                    "total_eval": int(clean_total_eval),
+                    "total_correct": int(clean_total_correct),
+                    "per_sample": clean_per_sample,
+                },
+                "attacked": {
+                    "micro_acc": attacked_micro_acc,
+                    "total_eval": int(attacked_total_eval),
+                    "total_correct": int(attacked_total_correct),
+                    "target_summary": attacked_target_summary,
+                    "per_sample": attacked_per_sample,
+                },
+            },
+        }
+
+        if include_defended:
+            summary["metrics"]["defended_micro_acc"] = defended_micro_acc
+            summary["metrics"]["defended_macro_f1"] = defended_metrics["macro_f1"] if defended_metrics else float("nan")
+            summary["metrics"]["defended_total_eval"] = int(defended_total_eval)
+            summary["metrics"]["defended_target_eval_count"] = defended_target_summary["target_eval_count"]
+            summary["metrics"]["defended_target_samples"] = defended_target_summary["samples_with_targets"]
+            summary["metrics"]["defended_target_asr_good"] = defended_target_summary["asr_good"]
+            summary["metrics"]["defended_target_asr_bad"] = defended_target_summary["asr_bad"]
+            summary["metrics"]["defended_target_asr_post"] = defended_target_summary["asr_post"]
+            summary["metrics"]["defended_target_nfr"] = defended_target_summary["nfr"]
+            summary["metrics"]["defense_recovery_target_eval_count"] = recovery_summary["target_eval_count"]
+            summary["metrics"]["defense_recovery_target_samples"] = recovery_summary["samples_with_targets"]
+            summary["metrics"]["defense_recovery_attack_success_pos"] = recovery_summary["attack_success_pos"]
+            summary["metrics"]["defense_recovery_attack_success_pos_recovered"] = recovery_summary[
+                "attack_success_pos_recovered"
+            ]
+            summary["metrics"]["defense_recovery_rate_pos"] = recovery_summary["recovery_rate_pos"]
+            summary["details"]["defended"] = {
+                "micro_acc": defended_micro_acc,
+                "total_eval": int(defended_total_eval),
+                "total_correct": int(defended_total_correct),
+                "target_summary": defended_target_summary,
+                "recovery_summary": recovery_summary,
+                "per_sample": defended_per_sample,
+            }
+
+        out_dir = self._resolve_output_dir()
+        tag = f"{split}_surrogate_minta_evasion_defended" if include_defended else f"{split}_surrogate_minta_evasion"
+        pt_path = os.path.join(out_dir, f"{tag}_results.pt")
+        json_path = os.path.join(out_dir, f"{tag}_metrics.json")
+        torch.save(summary, pt_path)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "split": summary["split"],
+                    "eval_split": summary["eval_split"],
+                    "train_split": summary["train_split"],
+                    "protocol": summary["protocol"],
+                    "target_type": summary["target_type"],
+                    "timestamp": summary["timestamp"],
+                    "metrics": summary["metrics"],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        print(
+            f"[{tag}] clean={summary['metrics']['clean_micro_acc']:.4f} "
+            f"attacked={summary['metrics']['attacked_micro_acc']:.4f}"
+            + (
+                f" defended={summary['metrics']['defended_micro_acc']:.4f}"
+                if include_defended and "defended_micro_acc" in summary["metrics"]
+                else ""
+            )
+            + f" (saved to {out_dir})"
+        )
+        return summary
+
     def run(
         self,
         split: str = "test",
@@ -438,7 +749,25 @@ class SurrogateAttackPipeline:
         eval_split: str = "test",
         include_defended: Optional[bool] = None,
         positive_label: int = 1,
+        protocol: str = "auto",
+        train_split: str = "train",
     ) -> Dict[str, Any]:
+        if protocol not in {"auto", "poison_train", "minta_evasion"}:
+            raise ValueError(f"Unknown protocol '{protocol}'.")
+        if protocol == "auto":
+            protocol = "minta_evasion" if isinstance(self.attacker, MintaAttacker) else "poison_train"
+        if protocol == "minta_evasion":
+            return self._run_minta_evasion(
+                split=split,
+                train_split=train_split,
+                train_epochs=train_epochs,
+                shuffle=shuffle,
+                log_every=log_every,
+                eval_split=eval_split,
+                include_defended=include_defended,
+                positive_label=positive_label,
+            )
+
         ds = self._get_split_dataset(split)
         sample0 = ds[0] if len(ds) > 0 else None
         if sample0 is None:
@@ -629,4 +958,31 @@ class SurrogateAttackPipeline:
             eval_split=eval_split,
             include_defended=True,
             positive_label=positive_label,
+            protocol="poison_train",
+        )
+
+    def minta_evasion(
+        self,
+        split: str = "test",
+        train_split: str = "train",
+        train_epochs: int = 100,
+        shuffle: bool = False,
+        log_every: int = 1,
+        eval_split: str = "test",
+        include_defended: Optional[bool] = True,
+        positive_label: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Wrapper for MintA-aligned evasion protocol.
+        """
+        return self.run(
+            split=split,
+            train_epochs=train_epochs,
+            shuffle=shuffle,
+            log_every=log_every,
+            eval_split=eval_split,
+            include_defended=include_defended,
+            positive_label=positive_label,
+            protocol="minta_evasion",
+            train_split=train_split,
         )
