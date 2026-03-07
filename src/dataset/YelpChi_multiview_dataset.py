@@ -125,12 +125,20 @@ class YelpChiHeteroDataset(Dataset):
         orig_labels = self.original_data[target_type].y.cpu().numpy()
 
         return set(np.unique(sub_labels)) == set(np.unique(orig_labels))
+
+    @staticmethod
+    def _to_label_index(y: torch.Tensor) -> torch.Tensor:
+        if y.dim() > 1 and y.size(-1) > 1:
+            return y.argmax(dim=-1).to(torch.long)
+        return y.view(-1).to(torch.long)
     
     def HGT_partitioning(self):
         self.num_hops = 3
         self.fanout = 5
         hetero = self.original_data
         target_type = self.target_node_type
+        if not hasattr(hetero[target_type], "y"):
+            raise ValueError(f"Target node type '{target_type}' has no labels, cannot compute class statistics.")
 
         target_nodes = torch.arange(hetero[target_type].num_nodes)
         perm = torch.randperm(len(target_nodes))
@@ -157,17 +165,40 @@ class YelpChiHeteroDataset(Dataset):
         min_size = float("inf")
         size_count = 0
         sub_nums = 0
+        reject_nums = 0
+
+        target_y_full = self._to_label_index(hetero[target_type].y)
+        num_classes = int(target_y_full.max().item()) + 1 if target_y_full.numel() > 0 else 0
+        split_class_sum = {
+            "train": np.zeros(num_classes, dtype=float),
+            "val": np.zeros(num_classes, dtype=float),
+            "test": np.zeros(num_classes, dtype=float),
+        }
 
         pbar = tqdm(total=self.num_parts, desc="Sampling Subgraphs (HGT)", ncols=120)
         for batch in loader:
             sub_hetero = batch
 
             if not self._validate_label_coverage(sub_hetero, target_type):
+                reject_nums += 1
                 continue
             else:
                 sub_nums += 1
 
             sub_hetero = RandomNodeSplit(num_val=0.2, num_test=0.4)(sub_hetero)
+
+            target_y = self._to_label_index(sub_hetero[target_type].y)
+            for split_name in ["train", "val", "test"]:
+                mask_name = f"{split_name}_mask"
+                if hasattr(sub_hetero[target_type], mask_name):
+                    mask = getattr(sub_hetero[target_type], mask_name).to(torch.bool)
+                    if int(mask.sum().item()) > 0:
+                        cnt = torch.bincount(target_y[mask], minlength=num_classes).to(torch.float).cpu().numpy()
+                    else:
+                        cnt = np.zeros(num_classes, dtype=float)
+                else:
+                    cnt = np.zeros(num_classes, dtype=float)
+                split_class_sum[split_name] += cnt
 
             n = sub_hetero.num_nodes
             max_size = max(max_size, n)
@@ -176,15 +207,32 @@ class YelpChiHeteroDataset(Dataset):
             all_hetero_subs.append(sub_hetero)
 
             pbar.update(1)
-            pbar.set_postfix({
-                "size": n,
-                "avg": f"{size_count / sub_nums:.1f}",
-                "max": max_size,
-                "reject": f"{(pbar.n / (pbar.n + (len(all_hetero_subs)))):.2f}"
-            })
+            pbar.set_postfix({"size": n, "avg_nodes": f"{size_count / sub_nums:.1f}", "rejected": reject_nums})
             
             if sub_nums >= self.num_parts:
                 break
+
+        pbar.close()
+
+        if sub_nums == 0:
+            print("[HGT_partitioning] No valid subgraphs sampled. Please check label coverage constraints.")
+            return all_hetero_subs
+
+        print(
+            "[HGT_partitioning] "
+            f"accepted={sub_nums} rejected={reject_nums} "
+            f"nodes(avg/min/max)={size_count / sub_nums:.1f}/{int(min_size)}/{int(max_size)}"
+        )
+        for split_name in ["train", "val", "test"]:
+            mean_counts = split_class_sum[split_name] / float(sub_nums)
+            denom = float(mean_counts.sum())
+            mean_ratio = (mean_counts / denom) if denom > 0 else np.zeros(num_classes, dtype=float)
+            mean_counts_str = ", ".join(f"{v:.1f}" for v in mean_counts.tolist())
+            mean_ratio_str = ", ".join(f"{v:.3f}" for v in mean_ratio.tolist())
+            print(
+                f"[HGT_partitioning:{split_name}] mean class counts=[{mean_counts_str}] "
+                f"mean ratio=[{mean_ratio_str}]"
+            )
 
         return all_hetero_subs
     
