@@ -6,3 +6,12 @@ num_parts: 500
 keep_hetero: False
 target: 'review'
 metapaths: [["review", "rur", "review"],["review", "rsr", "review"],["review", "rtr", "review"]]
+
+# Node split tuning for train-stage subgraphs only.
+# train ratio = 1 - train_node_val_ratio - train_node_test_ratio
+train_node_val_ratio: 0.15
+train_node_test_ratio: 0.25
+
+# Majority-class downsampling on train_mask of each train-stage subgraph.
+rebalance_train_majority: true
+train_majority_ratio_cap: 0.75

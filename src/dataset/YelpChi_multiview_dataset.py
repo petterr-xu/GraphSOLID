@@ -77,11 +77,29 @@ class YelpChiMultiviewDataset(Dataset):
                 global_idx += 1
 
 class YelpChiHeteroDataset(Dataset):
-    def __init__(self, stage, root, original_data:HeteroData, target_node_type, num_parts=100, transform=None, pre_transform=None, strategy='HGT'):
+    def __init__(
+        self,
+        stage,
+        root,
+        original_data: HeteroData,
+        target_node_type,
+        num_parts=100,
+        transform=None,
+        pre_transform=None,
+        strategy='HGT',
+        node_val_ratio: float = 0.2,
+        node_test_ratio: float = 0.4,
+        rebalance_train_majority: bool = False,
+        train_majority_ratio_cap: float = 0.85,
+    ):
         self.stage = stage
         self.original_data = original_data
         self.num_parts = num_parts
         self.target_node_type = target_node_type
+        self.node_val_ratio = float(node_val_ratio)
+        self.node_test_ratio = float(node_test_ratio)
+        self.rebalance_train_majority = bool(rebalance_train_majority)
+        self.train_majority_ratio_cap = float(train_majority_ratio_cap)
         # 计算各阶段应有的数量（用于 len()）
         self.train_n = int(num_parts * 0.8)
         self.val_n = int(num_parts * 0.1)
@@ -131,6 +149,50 @@ class YelpChiHeteroDataset(Dataset):
         if y.dim() > 1 and y.size(-1) > 1:
             return y.argmax(dim=-1).to(torch.long)
         return y.view(-1).to(torch.long)
+
+    def _split_and_rebalance(self, sub_hetero: HeteroData) -> HeteroData:
+        sub_hetero = RandomNodeSplit(num_val=self.node_val_ratio, num_test=self.node_test_ratio)(sub_hetero)
+        if not self.rebalance_train_majority or self.stage != "train":
+            return sub_hetero
+
+        target = self.target_node_type
+        if not hasattr(sub_hetero[target], "y") or not hasattr(sub_hetero[target], "train_mask"):
+            return sub_hetero
+        if not (0.5 < self.train_majority_ratio_cap < 1.0):
+            return sub_hetero
+
+        y = self._to_label_index(sub_hetero[target].y).cpu()
+        train_mask = sub_hetero[target].train_mask.clone().to(torch.bool).cpu()
+        idx_train = train_mask.nonzero(as_tuple=False).view(-1)
+        if idx_train.numel() == 0:
+            return sub_hetero
+
+        y_train = y[idx_train]
+        class_counts = torch.bincount(y_train)
+        if class_counts.numel() < 2:
+            return sub_hetero
+
+        majority_cls = int(torch.argmax(class_counts).item())
+        majority_count = int(class_counts[majority_cls].item())
+        total_count = int(class_counts.sum().item())
+        other_count = total_count - majority_count
+        if other_count <= 0:
+            return sub_hetero
+
+        max_majority = int((self.train_majority_ratio_cap / (1.0 - self.train_majority_ratio_cap)) * other_count)
+        if majority_count <= max_majority:
+            return sub_hetero
+        max_majority = max(1, max_majority)
+
+        majority_idx_global = idx_train[y_train == majority_cls]
+        keep_perm = torch.randperm(majority_idx_global.numel())[:max_majority]
+        keep_majority = majority_idx_global[keep_perm]
+
+        new_train_mask = train_mask.clone()
+        new_train_mask[majority_idx_global] = False
+        new_train_mask[keep_majority] = True
+        sub_hetero[target].train_mask = new_train_mask.to(sub_hetero[target].train_mask.device)
+        return sub_hetero
     
     def HGT_partitioning(self):
         self.num_hops = 3
@@ -185,7 +247,7 @@ class YelpChiHeteroDataset(Dataset):
             else:
                 sub_nums += 1
 
-            sub_hetero = RandomNodeSplit(num_val=0.2, num_test=0.4)(sub_hetero)
+            sub_hetero = self._split_and_rebalance(sub_hetero)
 
             target_y = self._to_label_index(sub_hetero[target_type].y)
             for split_name in ["train", "val", "test"]:
@@ -247,8 +309,7 @@ class YelpChiHeteroDataset(Dataset):
         for sub_homo in enumerate(tqdm(loader, desc='Sampling Subgraphs (cluster strategy)')):
             # 还原为异构图
             sub_hetero = sub_homo.to_heterogeneous(node_type_names=node_types, edge_type_names=edge_types)
-            transform = RandomNodeSplit(num_val=0.2, num_test=0.4)
-            sub_hetero = transform(sub_hetero)
+            sub_hetero = self._split_and_rebalance(sub_hetero)
             all_hetero_subs.append(sub_hetero)
         return all_hetero_subs
     
@@ -297,7 +358,7 @@ class YelpChiHeteroDataset(Dataset):
                 subset_dict[ntype] = local_ids
 
             sub_hetero = hetero.subgraph(subset_dict)
-            sub_hetero = RandomNodeSplit(num_val=0.2, num_test=0.4)(sub_hetero)
+            sub_hetero = self._split_and_rebalance(sub_hetero)
 
             max_size = max(max_size, sub_hetero.num_nodes)
             min_size = min(min_size, sub_hetero.num_nodes)
@@ -342,10 +403,42 @@ class YelpChihDataModule(AbstractDataModule):
         self.metapaths = cfg.dataset.metapaths
         self.target = cfg.dataset.target
         self.num_parts = cfg.dataset.num_parts
+        train_node_val_ratio = float(getattr(cfg.dataset, "train_node_val_ratio", 0.2))
+        train_node_test_ratio = float(getattr(cfg.dataset, "train_node_test_ratio", 0.4))
+        rebalance_train_majority = bool(getattr(cfg.dataset, "rebalance_train_majority", False))
+        train_majority_ratio_cap = float(getattr(cfg.dataset, "train_majority_ratio_cap", 0.85))
         # 构造异构图数据集
-        train_hetero = YelpChiHeteroDataset('train', self.root, self.hetero_graph, self.target, self.num_parts)
-        val_hetero = YelpChiHeteroDataset('val', self.root, self.hetero_graph, self.target, self.num_parts)
-        test_hetero = YelpChiHeteroDataset('test', self.root, self.hetero_graph, self.target, self.num_parts)
+        train_hetero = YelpChiHeteroDataset(
+            'train',
+            self.root,
+            self.hetero_graph,
+            self.target,
+            self.num_parts,
+            node_val_ratio=train_node_val_ratio,
+            node_test_ratio=train_node_test_ratio,
+            rebalance_train_majority=rebalance_train_majority,
+            train_majority_ratio_cap=train_majority_ratio_cap,
+        )
+        val_hetero = YelpChiHeteroDataset(
+            'val',
+            self.root,
+            self.hetero_graph,
+            self.target,
+            self.num_parts,
+            node_val_ratio=0.2,
+            node_test_ratio=0.4,
+            rebalance_train_majority=False,
+        )
+        test_hetero = YelpChiHeteroDataset(
+            'test',
+            self.root,
+            self.hetero_graph,
+            self.target,
+            self.num_parts,
+            node_val_ratio=0.2,
+            node_test_ratio=0.4,
+            rebalance_train_majority=False,
+        )
         self.hetero_datasets = {
             'train': train_hetero,
             'val': val_hetero,
