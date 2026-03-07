@@ -161,15 +161,6 @@ def main(cfg: DictConfig):
                                                                 factor = 0.5,
                                                                 patience = 100,
                                                                 verbose=False)
-    pipeline = DefaultPipeline(dataset_module=datamodule, 
-                               defender=diffusionDefender, 
-                               attacker=attacker, 
-                               classifier=classifier, 
-                               classifier_optimizer=classifier_optimizer, 
-                               classifier_criterion=classifier_criterion, 
-                               cl_scheduler=cl_scheduler,
-                               target=cfg.dataset.target, 
-                               device=device)
     minta_victim_engine = str(getattr(cfg.general, "minta_victim_engine", "hetero")).lower()
     if minta_victim_engine == "dense_surrogate":
         input_dim = int(hetero_data.g[target].x.size(-1))
@@ -193,7 +184,7 @@ def main(cfg: DictConfig):
             device=device,
         ).to(device)
     minta_pipeline = SurrogateAttackPipeline(dataset_module=datamodule,attacker=attacker, classifier_engine=classifier_eg, defender=diffusionDefender, device=device)
-    minta_pipeline.evasion_then_defend(
+    result = minta_pipeline.evasion_then_defend(
         split='test',
         train_split=getattr(cfg.general, "minta_train_split", "train"),
         train_epochs=int(getattr(cfg.general, "minta_victim_epochs", 200)),
@@ -204,7 +195,6 @@ def main(cfg: DictConfig):
         early_stop_min_delta=float(getattr(cfg.general, "minta_victim_min_delta", 1e-3)),
         train_log_interval=int(getattr(cfg.general, "minta_train_log_interval", 10)),
     )
-    result = pipeline.defend_after_attack(split='test')
     print(result['metrics'])
 
 

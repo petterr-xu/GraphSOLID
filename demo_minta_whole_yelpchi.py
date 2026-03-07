@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import os.path as osp
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from src.attack.attacker import MintaAttacker
 from src.attack.surrogate_pipeline import SurrogateAttackPipeline
 from src.models import HeteroNN, classifier_engine
 from src.utils.hetero_dataset_util import GraphDataLoader
+from src.utils import graphbuilder, VNG_utils
 
 
 @dataclass
@@ -85,8 +87,49 @@ def _prepare_device(device: str) -> str:
     return device
 
 
+def load_imb_data(dataset, imb_ratio = 0, keep_edge=True,device='cpu'):
+    root_path = osp.dirname(osp.realpath(__file__))
+    loader = GraphDataLoader()
+    data_path = osp.join(root_path, 'data', dataset, 'data', dataset + '.mat')
+    cnfg_path = osp.join(root_path, 'data', dataset, 'meta', dataset + '.json')
+    hetero_ctx = loader.load_from_config(cnfg_path, data_path)
+    target = hetero_ctx.target_node  # 'review' 或 'user'
+    data = hetero_ctx.g.to(device)
+    n_feat = hetero_ctx.n_features
+    n_cls = hetero_ctx.n_classes
+    print(data)
+    if imb_ratio == 0:
+        return hetero_ctx
+    
+    max_n=500
+    if dataset in ['YelpChi', 'Amazon-Products']:
+        data_train_mask, data_val_mask, data_test_mask = data[target].train_mask.clone(), data[target].val_mask.clone(), data[target].test_mask.clone()
+        stats = data[target].y[data_train_mask]
+        n_data = []
+        for i in range(n_cls):
+            data_num = (stats == i).sum()
+            n_data.append(int(data_num.item()))
+        idx_info = VNG_utils.get_idx_info(data[target].y, n_cls, data_train_mask)
+        class_num_list = n_data
+        print("num of class in original training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
+        class_num_list, data_train_mask, _, edge_mask_dict = graphbuilder.make_hetero_longtailed_data_remove(data, target, n_data, n_cls, imb_ratio, data_train_mask.clone(), max_n)
+        # 更新 HeteroData
+        hetero_ctx.g[hetero_ctx.target_node].train_mask = data_train_mask
+        # 更新边索引 (可选，取决于是否想物理删除边)
+        if not keep_edge:
+            for etype, mask in edge_mask_dict.items():
+                hetero_ctx.g[etype].edge_index = hetero_ctx.g[etype].edge_index[:, mask]
+        print("num of class in LT-training data: {} -> {}".format(class_num_list,sum(data_train_mask).item()))
+        minority_mask = class_num_list < (sum(class_num_list)/n_cls)
+        minority_class = [i for i in range(n_cls) if minority_mask[i]]
+        print("minority classes {}".format(minority_class))
+    else:
+        raise NotImplementedError("Not implemented for dataset {}".format(dataset))
+    
+    return hetero_ctx
+
 def _load_whole_graph(config_path: str, mat_path: str):
-    ctx = GraphDataLoader.load_from_config(config_path, mat_path, device=None)
+    ctx = load_imb_data("YelpChi", imb_ratio=0, keep_edge=True, device='cpu')
     g = ctx.g
     target = ctx.target_node
     nclass = int(g[target].y.max().item()) + 1
