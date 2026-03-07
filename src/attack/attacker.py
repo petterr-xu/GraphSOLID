@@ -753,6 +753,8 @@ class MintaAttacker(Attacker):
         dataset_module: AbstractDataModule,
         perturb_ratio: float = 0.1,
         adv_nodes_test_size: int = 100,
+        positive_label: int = 1,
+        only_attack_correctly_detected: bool = True,
         surrogate_train_size: int = 4000,
         surrogate_hidden: int = 64,
         surrogate_epochs: int = 50,
@@ -772,6 +774,8 @@ class MintaAttacker(Attacker):
         super().__init__(dataset_module)
         self.perturb_ratio = float(perturb_ratio)
         self.adv_nodes_test_size = int(adv_nodes_test_size)
+        self.positive_label = int(positive_label)
+        self.only_attack_correctly_detected = bool(only_attack_correctly_detected)
         self.surrogate_train_size = int(surrogate_train_size)
         self.surrogate_hidden = int(surrogate_hidden)
         self.surrogate_epochs = int(surrogate_epochs)
@@ -909,7 +913,7 @@ class MintaAttacker(Attacker):
 
         return edge_types_for_A, edge_type_to_perturb
 
-    def _select_adv_nodes(self, data: HeteroData, target: str) -> np.ndarray:
+    def _select_adv_nodes(self, data: HeteroData, target: str) -> Tuple[np.ndarray, Dict[str, Any]]:
         if target not in data.node_types:
             raise ValueError(f"[MintaAttacker] target_node_type '{target}' not in data.node_types.")
 
@@ -919,17 +923,37 @@ class MintaAttacker(Attacker):
             raise ValueError("[MintaAttacker] target node test_mask is required to sample adversarial nodes.")
 
         test_idx = test_mask.nonzero(as_tuple=False).view(-1).cpu().numpy()
-        if y is not None:
-            y_test = y[test_mask].cpu().numpy()
-            mal_idx = test_idx[y_test == 1]
-        else:
-            mal_idx = test_idx
+        if y is None:
+            raise ValueError("[MintaAttacker] target node labels are required for MintA adversarial-node sampling.")
 
+        y_test = y[test_mask].cpu().numpy()
+        mal_idx = test_idx[y_test == self.positive_label]
         if len(mal_idx) == 0:
             raise ValueError("[MintaAttacker] No malicious test nodes found for adversarial sampling.")
 
-        k = min(self.adv_nodes_test_size, len(mal_idx))
-        return np.array(random.sample(list(mal_idx), k), dtype=int)
+        candidates = mal_idx
+        used_detected = False
+        detected_mal_idx = np.array([], dtype=int)
+        if self.only_attack_correctly_detected:
+            pred_test = self._predict_nodes_with_victim(data, target, test_idx)
+            if pred_test is not None:
+                detected_idx = test_idx[pred_test == self.positive_label]
+                detected_mal_idx = np.intersect1d(mal_idx, detected_idx, assume_unique=False)
+                if len(detected_mal_idx) > 0:
+                    candidates = detected_mal_idx
+                    used_detected = True
+
+        k = min(self.adv_nodes_test_size, len(candidates))
+        selected = np.array(random.sample(list(candidates), k), dtype=int)
+        info = {
+            "num_test_nodes": int(len(test_idx)),
+            "num_malicious_test_nodes": int(len(mal_idx)),
+            "num_detected_malicious_test_nodes": int(len(detected_mal_idx)),
+            "used_detected_malicious_subset": bool(used_detected),
+            "selected_adv_nodes": int(k),
+            "positive_label": int(self.positive_label),
+        }
+        return selected, info
 
     def _extract_A_adv(self, data: HeteroData, adv_nodes: np.ndarray, edge_types_for_A: list, target: str) -> np.ndarray:
         n = len(adv_nodes)
@@ -1061,7 +1085,7 @@ class MintaAttacker(Attacker):
         out = data.clone()
 
         # 1) Sample adversarial nodes
-        adv_nodes_test = self._select_adv_nodes(out, target)
+        adv_nodes_test, select_info = self._select_adv_nodes(out, target)
 
         # 2) Build A_adv for adversarial nodes
         A_adv = self._extract_A_adv(out, adv_nodes_test, edge_types_for_A, target)
@@ -1171,6 +1195,7 @@ class MintaAttacker(Attacker):
             "target_type": target,
             "adv_nodes": adv_nodes_tensor.clone(),
             "num_adv_nodes": int(adv_nodes_tensor.numel()),
+            **select_info,
             "enable_feature_perturb": bool(self.enable_feature_perturb),
             "perturb_budget_val": int(val),
             "edge_type_to_perturb": edge_type_to_perturb,
