@@ -191,7 +191,7 @@ def _run_trial(base_graph, target: str, nclass: int, args, device: str, trial_id
         dataset_module=dm,
         perturb_ratio=args.perturb_ratio,
         adv_nodes_test_size=args.adv_nodes_test_size,
-        positive_label=args.positive_label,
+        target_label=args.positive_label,
         only_attack_correctly_detected=(not args.allow_undetected_targets),
         surrogate_train_size=args.surrogate_train_size,
         surrogate_hidden=args.surrogate_hidden,

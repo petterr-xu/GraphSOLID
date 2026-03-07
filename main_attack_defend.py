@@ -141,11 +141,12 @@ def main(cfg: DictConfig):
         attacker = MintaAttacker(
             datamodule,
             perturb_ratio=cfg.general.perturb_ratio,
-            positive_label=minta_positive_label,
+            target_label=minta_positive_label,
             only_attack_correctly_detected=bool(getattr(cfg.general, "minta_only_attack_correctly_detected", True)),
             surrogate_epochs=int(getattr(cfg.general, "minta_surrogate_epochs", 50)),
             surrogate_early_stop_patience=int(getattr(cfg.general, "minta_surrogate_patience", 10)),
             surrogate_early_stop_min_delta=float(getattr(cfg.general, "minta_surrogate_min_delta", 1e-3)),
+            enable_feature_perturb = False, # 目前仅攻击结构
             device=device,
         )
     else:

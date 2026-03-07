@@ -753,13 +753,13 @@ class MintaAttacker(Attacker):
         dataset_module: AbstractDataModule,
         perturb_ratio: float = 0.1,
         adv_nodes_test_size: int = 100,
-        positive_label: int = 1,
+        target_label: int = 1,
         only_attack_correctly_detected: bool = True,
         surrogate_train_size: int = 4000,
         surrogate_hidden: int = 64,
         surrogate_epochs: int = 50,
         surrogate_lr: float = 0.01,
-        enable_feature_perturb: bool = True,
+        enable_feature_perturb: bool = False,
         target_node_type: Optional[str] = None,
         edge_types_for_A: Optional[list] = None,
         edge_type_to_perturb: Optional[Tuple[str, str, str]] = None,
@@ -774,7 +774,7 @@ class MintaAttacker(Attacker):
         super().__init__(dataset_module)
         self.perturb_ratio = float(perturb_ratio)
         self.adv_nodes_test_size = int(adv_nodes_test_size)
-        self.positive_label = int(positive_label)
+        self.positive_label = int(target_label)
         self.only_attack_correctly_detected = bool(only_attack_correctly_detected)
         self.surrogate_train_size = int(surrogate_train_size)
         self.surrogate_hidden = int(surrogate_hidden)
