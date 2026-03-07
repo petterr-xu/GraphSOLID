@@ -213,6 +213,23 @@ def _mean_ignore_nan(values: List[float]) -> float:
     return float(np.nanmean(arr))
 
 
+def _to_jsonable(obj: Any) -> Any:
+    if isinstance(obj, torch.Tensor):
+        t = obj.detach().cpu()
+        if t.ndim == 0:
+            return t.item()
+        return t.tolist()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_jsonable(v) for v in obj]
+    return obj
+
+
 def main() -> None:
     args = _build_parser().parse_args()
     device = _prepare_device(args.device)
@@ -252,7 +269,7 @@ def main() -> None:
     }
     out_path = os.path.join(args.out_dir, "whole_yelpchi_minta_demo_summary.json")
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+        json.dump(_to_jsonable(payload), f, ensure_ascii=False, indent=2)
 
     print("=== Aggregate ===")
     print(json.dumps(aggregate, ensure_ascii=False, indent=2))
