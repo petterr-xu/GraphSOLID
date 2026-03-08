@@ -254,6 +254,7 @@ class DefaultPipeline:
                 "attacked_target_asr_good": attacked_target_summary["asr_good"],
                 "attacked_target_asr_bad": attacked_target_summary["asr_bad"],
                 "attacked_target_asr_post": attacked_target_summary["asr_post"],
+                "attacked_target_asr_on_attacked": attacked_target_summary["asr_on_attacked"],
                 "attacked_target_nfr": attacked_target_summary["nfr"],
             },
             "details": {
@@ -664,6 +665,7 @@ class DefaultPipeline:
             "asr_good": float("nan"),
             "asr_bad": float("nan"),
             "asr_post": float("nan"),
+            "asr_on_attacked": float("nan"),
             "nfr": float("nan"),
         }
         if attack_nodes is None or attack_nodes.numel() == 0:
@@ -694,6 +696,7 @@ class DefaultPipeline:
 
         asr_good = float("nan") if num_clean_pos == 0 else (num_pos_to_neg / num_clean_pos)
         asr_bad = float("nan") if num_clean_neg == 0 else (num_neg_to_pos / num_clean_neg)
+        asr_on_attacked = float("nan") if len(common_nodes) == 0 else (num_pos_to_neg / len(common_nodes))
 
         true_pos = y_true == int(positive_label)
         num_true_pos = int(true_pos.sum().item())
@@ -711,6 +714,7 @@ class DefaultPipeline:
             "asr_good": asr_good,
             "asr_bad": asr_bad,
             "asr_post": asr_post,
+            "asr_on_attacked": asr_on_attacked,
             "nfr": asr_bad,
         }
 
@@ -807,12 +811,14 @@ class DefaultPipeline:
         neg_to_pos = int(totals["num_neg_to_pos"])
         asr_good = float("nan") if pos == 0 else (pos_to_neg / pos)
         asr_bad = float("nan") if neg == 0 else (neg_to_pos / neg)
+        attacked_cnt = int(totals["target_eval_count"])
+        asr_on_attacked = float("nan") if attacked_cnt == 0 else (pos_to_neg / attacked_cnt)
         true_pos = int(totals["num_true_pos"])
         true_pos_undetected_after = int(totals["num_true_pos_undetected_after"])
         asr_post = float("nan") if true_pos == 0 else (true_pos_undetected_after / true_pos)
         return {
             "samples_with_targets": int(totals["samples_with_targets"]),
-            "target_eval_count": int(totals["target_eval_count"]),
+            "target_eval_count": attacked_cnt,
             "num_true_pos": true_pos,
             "num_true_pos_undetected_after": true_pos_undetected_after,
             "num_clean_pos": pos,
@@ -822,6 +828,7 @@ class DefaultPipeline:
             "asr_good": asr_good,
             "asr_bad": asr_bad,
             "asr_post": asr_post,
+            "asr_on_attacked": asr_on_attacked,
             "nfr": asr_bad,
         }
 
@@ -1250,6 +1257,7 @@ class DefaultPipeline:
                 "attacked_target_asr_good": attacked_target_summary["asr_good"],
                 "attacked_target_asr_bad": attacked_target_summary["asr_bad"],
                 "attacked_target_asr_post": attacked_target_summary["asr_post"],
+                "attacked_target_asr_on_attacked": attacked_target_summary["asr_on_attacked"],
                 "attacked_target_nfr": attacked_target_summary["nfr"],
                 "defended_target_eval_count": defended_target_summary["target_eval_count"],
                 "defended_target_samples": defended_target_summary["samples_with_targets"],
@@ -1262,6 +1270,7 @@ class DefaultPipeline:
                 "defended_target_asr_good": defended_target_summary["asr_good"],
                 "defended_target_asr_bad": defended_target_summary["asr_bad"],
                 "defended_target_asr_post": defended_target_summary["asr_post"],
+                "defended_target_asr_on_attacked": defended_target_summary["asr_on_attacked"],
                 "defended_target_nfr": defended_target_summary["nfr"],
                 "defense_recovery_target_eval_count": recovery_summary["target_eval_count"],
                 "defense_recovery_target_samples": recovery_summary["samples_with_targets"],
