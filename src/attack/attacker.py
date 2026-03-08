@@ -773,7 +773,7 @@ class MintaAttacker(Attacker):
     ):
         super().__init__(dataset_module)
         self.perturb_ratio = float(perturb_ratio)
-        self.adv_nodes_test_size = int(adv_nodes_test_size)
+        self.ctrl_nodes_size = int(adv_nodes_test_size)
         self.positive_label = int(target_label)
         self.only_attack_correctly_detected = bool(only_attack_correctly_detected)
         self.surrogate_train_size = int(surrogate_train_size)
@@ -913,7 +913,11 @@ class MintaAttacker(Attacker):
 
         return edge_types_for_A, edge_type_to_perturb
 
-    def _select_adv_nodes(self, data: HeteroData, target: str) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _select_control_and_attack_nodes(
+        self,
+        data: HeteroData,
+        target: str,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         if target not in data.node_types:
             raise ValueError(f"[MintaAttacker] target_node_type '{target}' not in data.node_types.")
 
@@ -931,29 +935,44 @@ class MintaAttacker(Attacker):
         if len(mal_idx) == 0:
             raise ValueError("[MintaAttacker] No malicious test nodes found for adversarial sampling.")
 
-        candidates = mal_idx
-        used_detected = False
-        detected_mal_idx = np.array([], dtype=int)
-        if self.only_attack_correctly_detected:
-            pred_test = self._predict_nodes_with_victim(data, target, test_idx)
-            if pred_test is not None:
-                detected_idx = test_idx[pred_test == self.positive_label]
-                detected_mal_idx = np.intersect1d(mal_idx, detected_idx, assume_unique=False)
-                if len(detected_mal_idx) > 0:
-                    candidates = detected_mal_idx
-                    used_detected = True
+        k_control = min(self.ctrl_nodes_size, len(mal_idx))
+        control_nodes = np.array(random.sample(list(mal_idx), k_control), dtype=int)
 
-        k = min(self.adv_nodes_test_size, len(candidates))
-        selected = np.array(random.sample(list(candidates), k), dtype=int)
+        pred_control = self._predict_nodes_with_victim(data, target, control_nodes)
+        detected_attack_nodes = np.array([], dtype=int)
+        if pred_control is not None:
+            detected_attack_nodes = control_nodes[pred_control == self.positive_label]
+
+        if self.only_attack_correctly_detected:
+            attack_nodes = detected_attack_nodes
+        else:
+            attack_nodes = detected_attack_nodes if pred_control is not None else control_nodes
+
         info = {
             "num_test_nodes": int(len(test_idx)),
             "num_malicious_test_nodes": int(len(mal_idx)),
-            "num_detected_malicious_test_nodes": int(len(detected_mal_idx)),
-            "used_detected_malicious_subset": bool(used_detected),
-            "selected_adv_nodes": int(k),
+            "num_control_nodes": int(len(control_nodes)),
+            "num_detected_attack_nodes": int(len(detected_attack_nodes)),
+            "selected_adv_nodes": int(len(attack_nodes)),
+            "skip_attack_due_to_no_detected_nodes": bool(len(attack_nodes) == 0),
             "positive_label": int(self.positive_label),
         }
-        return selected, info
+        return control_nodes, attack_nodes, info
+
+    def _compute_edge_budget(self, edge_index: torch.Tensor, control_nodes: np.ndarray) -> Tuple[int, int]:
+        """
+        Edge budget = floor(perturb_ratio * sum of incident degrees of controllable nodes)
+        on the target edge type.
+        """
+        if control_nodes is None or len(control_nodes) == 0:
+            return 0, 0
+        src = edge_index[0].detach().cpu().numpy()
+        dst = edge_index[1].detach().cpu().numpy()
+        control_nodes = np.asarray(control_nodes, dtype=np.int64)
+        deg_sum = int(np.isin(src, control_nodes).sum() + np.isin(dst, control_nodes).sum())
+        edge_budget = int(np.floor(self.perturb_ratio * deg_sum))
+        edge_budget = max(0, edge_budget)
+        return edge_budget, deg_sum
 
     def _extract_A_adv(self, data: HeteroData, adv_nodes: np.ndarray, edge_types_for_A: list, target: str) -> np.ndarray:
         n = len(adv_nodes)
@@ -1018,9 +1037,12 @@ class MintaAttacker(Attacker):
         x: torch.Tensor,
         A_adv: np.ndarray,
         surrogate: nn.Module,
-        val: int,
+        edge_budget: int,
         adv_nodes_test: np.ndarray,
     ) -> torch.Tensor:
+        if len(adv_nodes_test) == 0:
+            return edge_index.clone()
+
         temp0 = edge_index.cpu().numpy()
         X = x[adv_nodes_test].cpu().numpy()
         W1 = surrogate.gc1.data.cpu().numpy()
@@ -1045,7 +1067,9 @@ class MintaAttacker(Attacker):
                 F2 = self._find_my_soln(W2)
                 simi_arr[i, j] = np.linalg.norm(1 * F1 + 1 * F2)
 
-        top_k = max(1, val * val)
+        top_k = int(edge_budget)
+        if top_k <= 0:
+            return edge_index.clone()
         largest_idx = self._largest_indices(simi_arr, top_k)
 
         m = np.zeros((n, n))
@@ -1084,8 +1108,37 @@ class MintaAttacker(Attacker):
         device = torch.device(self.device) if self.device is not None else data[target].x.device
         out = data.clone()
 
-        # 1) Sample adversarial nodes
-        adv_nodes_test, select_info = self._select_adv_nodes(out, target)
+        # 1) Sample controllable nodes and attack-effective nodes
+        control_nodes, adv_nodes_test, select_info = self._select_control_and_attack_nodes(out, target)
+
+        if len(adv_nodes_test) == 0:
+            # If no controllable node can be detected as positive by victim, skip attack on this graph.
+            empty_nodes = torch.empty((0,), dtype=torch.long)
+            out.attack_target_nodes = empty_nodes
+            out.attack_target_type = target
+            out.minta_adv_nodes = empty_nodes
+            out.minta_target_type = target
+            self.last_attack_info = {
+                "attack_name": "minta",
+                "target_type": target,
+                "adv_nodes": empty_nodes,
+                "num_adv_nodes": 0,
+                **select_info,
+                "enable_feature_perturb": bool(self.enable_feature_perturb),
+                "edge_type_to_perturb": edge_type_to_perturb,
+                "edge_perturb_ratio": float(self.perturb_ratio),
+                "control_nodes_degree_sum": 0,
+                "edge_budget": 0,
+                "feature_budget": 0,
+                "perturb_budget_val": 0,
+                "num_edges_before": int(out[edge_type_to_perturb].edge_index.size(1)),
+                "num_edges_after": int(out[edge_type_to_perturb].edge_index.size(1)),
+                "num_added_edges": 0,
+                "num_removed_edges": 0,
+                "feature_delta_l1": 0.0,
+                "skipped": True,
+            }
+            return out
 
         # 2) Build A_adv for adversarial nodes
         A_adv = self._extract_A_adv(out, adv_nodes_test, edge_types_for_A, target)
@@ -1157,18 +1210,20 @@ class MintaAttacker(Attacker):
         else:
             preds_adv = out[target].y[adv_nodes_test].cpu().numpy()
 
-        # 5) Determine number of perturbations
-        val = max(1, int(self.perturb_ratio * len(adv_nodes_test)))
+        edge_index = out[edge_type_to_perturb].edge_index
+        edge_budget, control_deg_sum = self._compute_edge_budget(edge_index, control_nodes)
+
+        # 5) Feature perturbation budget is still tied to attack-effective nodes.
+        val = int(np.floor(self.perturb_ratio * len(adv_nodes_test)))
 
         # 6) Optional feature perturbation (can be disabled for structure-only MintA)
         x = out[target].x
-        if self.enable_feature_perturb:
+        if self.enable_feature_perturb and val > 0:
             x2 = self._feat_perturb(x, A_adv, surrogate, val, adv_nodes_test, preds_adv)
             out[target].x = x2
 
         # 7) Adjacency perturbation (apex relation by default)
-        edge_index = out[edge_type_to_perturb].edge_index
-        new_edge_index = self._adj_perturb_sim_apex(edge_index, x, A_adv, surrogate, val, adv_nodes_test)
+        new_edge_index = self._adj_perturb_sim_apex(edge_index, x, A_adv, surrogate, edge_budget, adv_nodes_test)
         out[edge_type_to_perturb].edge_index = new_edge_index
 
         # Attack diagnostics (helps validate that perturbations are actually applied).
@@ -1197,13 +1252,18 @@ class MintaAttacker(Attacker):
             "num_adv_nodes": int(adv_nodes_tensor.numel()),
             **select_info,
             "enable_feature_perturb": bool(self.enable_feature_perturb),
-            "perturb_budget_val": int(val),
+            "edge_perturb_ratio": float(self.perturb_ratio),
+            "control_nodes_degree_sum": int(control_deg_sum),
+            "edge_budget": int(edge_budget),
+            "feature_budget": int(max(0, val)),
+            "perturb_budget_val": int(max(0, val)),
             "edge_type_to_perturb": edge_type_to_perturb,
             "num_edges_before": int(edge_index.size(1)),
             "num_edges_after": int(new_edge_index.size(1)),
             "num_added_edges": int(num_added_edges),
             "num_removed_edges": int(num_removed_edges),
             "feature_delta_l1": feature_delta_l1,
+            "skipped": False,
         }
 
         return out
