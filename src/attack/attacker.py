@@ -959,17 +959,27 @@ class MintaAttacker(Attacker):
         }
         return control_nodes, attack_nodes, info
 
-    def _compute_edge_budget(self, edge_index: torch.Tensor, control_nodes: np.ndarray) -> Tuple[int, int]:
+    def _compute_edge_budget(
+        self,
+        data: HeteroData,
+        control_nodes: np.ndarray,
+        edge_types_for_degree: list,
+    ) -> Tuple[int, int]:
         """
         Edge budget = floor(perturb_ratio * sum of incident degrees of controllable nodes)
-        on the target edge type.
+        on selected target-target edge types.
         """
         if control_nodes is None or len(control_nodes) == 0:
             return 0, 0
-        src = edge_index[0].detach().cpu().numpy()
-        dst = edge_index[1].detach().cpu().numpy()
         control_nodes = np.asarray(control_nodes, dtype=np.int64)
-        deg_sum = int(np.isin(src, control_nodes).sum() + np.isin(dst, control_nodes).sum())
+        deg_sum = 0
+        for et in edge_types_for_degree:
+            if et not in data.edge_types:
+                continue
+            edge_index = data[et].edge_index
+            src = edge_index[0].detach().cpu().numpy()
+            dst = edge_index[1].detach().cpu().numpy()
+            deg_sum += int(np.isin(src, control_nodes).sum() + np.isin(dst, control_nodes).sum())
         edge_budget = int(np.floor(self.perturb_ratio * deg_sum))
         edge_budget = max(0, edge_budget)
         return edge_budget, deg_sum
@@ -1211,7 +1221,7 @@ class MintaAttacker(Attacker):
             preds_adv = out[target].y[adv_nodes_test].cpu().numpy()
 
         edge_index = out[edge_type_to_perturb].edge_index
-        edge_budget, control_deg_sum = self._compute_edge_budget(edge_index, control_nodes)
+        edge_budget, control_deg_sum = self._compute_edge_budget(out, control_nodes, edge_types_for_A)
 
         # 5) Feature perturbation budget is still tied to attack-effective nodes.
         val = int(np.floor(self.perturb_ratio * len(adv_nodes_test)))
