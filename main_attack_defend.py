@@ -237,7 +237,7 @@ def main(cfg: DictConfig):
             raise NotImplementedError("Unknown attack method {}".format(cfg.general.attack_method))
 
         diffusionDefender = DiffusionPurifyDefender(
-            diffusion_steps=10,
+            diffusion_steps=cfg.general.purify_steps,
             diffusion_model=model,
             metapaths=cfg.dataset.metapaths,
             target_node_type=cfg.dataset.target,

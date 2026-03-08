@@ -35,8 +35,11 @@ n_layers: 2
 attack_method: 'minta'    # 'metattack' | 'random' | 'minta'
 perturb_ratio: 0.15 # deprecated, use sub_edge_perturb_ratio and general_edge_perturb_ratio instead
 ctrl_nodes_size: 10
-sub_edge_perturb_ratio: 0.75
+sub_edge_perturb_ratio: 0.1
 general_edge_perturb_ratio: 0.15
+
+# defender settings
+purify_steps: 10
 
 # repeated experiment settings (for main_attack_defend.py)
 trial_runs: 10
