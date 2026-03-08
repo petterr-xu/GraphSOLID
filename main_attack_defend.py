@@ -133,14 +133,15 @@ def main(cfg: DictConfig):
     target = cfg.dataset.target
     nclass = hetero_data.n_classes
     if cfg.general.attack_method == 'metattack':
-        attacker = Metattacker(datamodule,perturb_ratio=cfg.general.perturb_ratio,re_trainings=5,device=gpuid,train_iters = 200)
+        attacker = Metattacker(datamodule,perturb_ratio=cfg.general.general_edge_perturb_ratio,re_trainings=5,device=gpuid,train_iters = 200)
     elif cfg.general.attack_method == 'random':
-        attacker = RandomAttacker(datamodule, perturb_ratio=cfg.general.perturb_ratio)
+        attacker = RandomAttacker(datamodule, perturb_ratio=cfg.general.general_edge_perturb_ratio)
     elif cfg.general.attack_method == 'minta':
         minta_positive_label = int(getattr(cfg.general, "minta_positive_label", 1))
         attacker = MintaAttacker(
             datamodule,
-            perturb_ratio=cfg.general.perturb_ratio,
+            perturb_ratio=cfg.general.sub_edge_perturb_ratio,
+            ctrl_nodes_size=cfg.general.ctrl_nodes_size,
             target_label=minta_positive_label,
             only_attack_correctly_detected=bool(getattr(cfg.general, "minta_only_attack_correctly_detected", True)),
             surrogate_epochs=int(getattr(cfg.general, "minta_surrogate_epochs", 50)),

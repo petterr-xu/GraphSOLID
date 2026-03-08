@@ -752,7 +752,7 @@ class MintaAttacker(Attacker):
         self,
         dataset_module: AbstractDataModule,
         perturb_ratio: float = 0.1,
-        adv_nodes_test_size: int = 100,
+        ctrl_nodes_size: int = 10,
         target_label: int = 1,
         only_attack_correctly_detected: bool = True,
         surrogate_train_size: int = 4000,
@@ -773,7 +773,7 @@ class MintaAttacker(Attacker):
     ):
         super().__init__(dataset_module)
         self.perturb_ratio = float(perturb_ratio)
-        self.ctrl_nodes_size = int(adv_nodes_test_size)
+        self.ctrl_nodes_size = int(ctrl_nodes_size)
         self.positive_label = int(target_label)
         self.only_attack_correctly_detected = bool(only_attack_correctly_detected)
         self.surrogate_train_size = int(surrogate_train_size)
