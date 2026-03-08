@@ -90,6 +90,48 @@ class SurrogateAttackPipeline:
         return d
 
     @staticmethod
+    def _compact_metrics(full_metrics: Dict[str, Any], protocol: str, include_defended: bool) -> Dict[str, Any]:
+        if protocol == "minta_evasion":
+            keys = [
+                "clean_micro_acc",
+                "attacked_micro_acc",
+                "clean_macro_f1",
+                "attacked_macro_f1",
+                "attacked_target_nodes_evaluated",
+                "attacked_target_graphs",
+                "attacked_target_asr_on_attacked",
+            ]
+            defended_keys = [
+                "defended_micro_acc",
+                "defended_macro_f1",
+                "defended_target_asr_on_attacked",
+                "defense_recovery_rate_pos",
+            ]
+        else:
+            keys = [
+                "clean_micro_acc",
+                "poisoned_micro_acc",
+                "clean_macro_f1",
+                "poisoned_macro_f1",
+                "poisoned_target_nodes_evaluated",
+                "poisoned_target_graphs",
+                "poisoned_target_asr_on_attacked",
+            ]
+            defended_keys = [
+                "defended_micro_acc",
+                "defended_macro_f1",
+                "defended_target_asr_on_attacked",
+                "defense_recovery_rate_pos",
+            ]
+
+        out = {k: full_metrics[k] for k in keys if k in full_metrics}
+        if include_defended:
+            for k in defended_keys:
+                if k in full_metrics:
+                    out[k] = full_metrics[k]
+        return out
+
+    @staticmethod
     def _metrics_from_confusion(confusion: torch.Tensor, total_eval: int) -> Dict[str, float]:
         eps = 1e-12
         tp = torch.diag(confusion).to(torch.float)
@@ -687,8 +729,8 @@ class SurrogateAttackPipeline:
                 "attacked_macro_f1": attacked_metrics["macro_f1"],
                 "clean_total_eval": int(clean_total_eval),
                 "attacked_total_eval": int(attacked_total_eval),
-                "attacked_target_eval_count": attacked_target_summary["target_eval_count"],
-                "attacked_target_samples": attacked_target_summary["samples_with_targets"],
+                "attacked_target_nodes_evaluated": attacked_target_summary["target_eval_count"],
+                "attacked_target_graphs": attacked_target_summary["samples_with_targets"],
                 "attacked_target_asr_good": attacked_target_summary["asr_good"],
                 "attacked_target_asr_bad": attacked_target_summary["asr_bad"],
                 "attacked_target_asr_post": attacked_target_summary["asr_post"],
@@ -698,8 +740,8 @@ class SurrogateAttackPipeline:
                 "poisoned_micro_acc": attacked_micro_acc,
                 "poisoned_macro_f1": attacked_metrics["macro_f1"],
                 "poisoned_total_eval": int(attacked_total_eval),
-                "poisoned_target_eval_count": attacked_target_summary["target_eval_count"],
-                "poisoned_target_samples": attacked_target_summary["samples_with_targets"],
+                "poisoned_target_nodes_evaluated": attacked_target_summary["target_eval_count"],
+                "poisoned_target_graphs": attacked_target_summary["samples_with_targets"],
                 "poisoned_target_asr_good": attacked_target_summary["asr_good"],
                 "poisoned_target_asr_bad": attacked_target_summary["asr_bad"],
                 "poisoned_target_asr_post": attacked_target_summary["asr_post"],
@@ -727,15 +769,15 @@ class SurrogateAttackPipeline:
             summary["metrics"]["defended_micro_acc"] = defended_micro_acc
             summary["metrics"]["defended_macro_f1"] = defended_metrics["macro_f1"] if defended_metrics else float("nan")
             summary["metrics"]["defended_total_eval"] = int(defended_total_eval)
-            summary["metrics"]["defended_target_eval_count"] = defended_target_summary["target_eval_count"]
-            summary["metrics"]["defended_target_samples"] = defended_target_summary["samples_with_targets"]
+            summary["metrics"]["defended_target_nodes_evaluated"] = defended_target_summary["target_eval_count"]
+            summary["metrics"]["defended_target_graphs"] = defended_target_summary["samples_with_targets"]
             summary["metrics"]["defended_target_asr_good"] = defended_target_summary["asr_good"]
             summary["metrics"]["defended_target_asr_bad"] = defended_target_summary["asr_bad"]
             summary["metrics"]["defended_target_asr_post"] = defended_target_summary["asr_post"]
             summary["metrics"]["defended_target_asr_on_attacked"] = defended_target_summary["asr_on_attacked"]
             summary["metrics"]["defended_target_nfr"] = defended_target_summary["nfr"]
-            summary["metrics"]["defense_recovery_target_eval_count"] = recovery_summary["target_eval_count"]
-            summary["metrics"]["defense_recovery_target_samples"] = recovery_summary["samples_with_targets"]
+            summary["metrics"]["defense_recovery_target_nodes_evaluated"] = recovery_summary["target_eval_count"]
+            summary["metrics"]["defense_recovery_target_graphs"] = recovery_summary["samples_with_targets"]
             summary["metrics"]["defense_recovery_attack_success_pos"] = recovery_summary["attack_success_pos"]
             summary["metrics"]["defense_recovery_attack_success_pos_recovered"] = recovery_summary[
                 "attack_success_pos_recovered"
@@ -749,6 +791,14 @@ class SurrogateAttackPipeline:
                 "recovery_summary": recovery_summary,
                 "per_sample": defended_per_sample,
             }
+
+        full_metrics = dict(summary["metrics"])
+        summary["details"]["debug_metrics_full"] = full_metrics
+        summary["metrics"] = self._compact_metrics(
+            full_metrics=full_metrics,
+            protocol="minta_evasion",
+            include_defended=include_defended,
+        )
 
         out_dir = self._resolve_output_dir()
         tag = f"{split}_surrogate_minta_evasion_defended" if include_defended else f"{split}_surrogate_minta_evasion"
@@ -926,8 +976,8 @@ class SurrogateAttackPipeline:
                 "poisoned_macro_f1": poison_result["eval"]["metrics"]["macro_f1"],
                 "clean_total_eval": clean_result["eval"]["total_eval"],
                 "poisoned_total_eval": poison_result["eval"]["total_eval"],
-                "poisoned_target_eval_count": poisoned_target_summary["target_eval_count"],
-                "poisoned_target_samples": poisoned_target_summary["samples_with_targets"],
+                "poisoned_target_nodes_evaluated": poisoned_target_summary["target_eval_count"],
+                "poisoned_target_graphs": poisoned_target_summary["samples_with_targets"],
                 "poisoned_target_asr_good": poisoned_target_summary["asr_good"],
                 "poisoned_target_asr_bad": poisoned_target_summary["asr_bad"],
                 "poisoned_target_asr_post": poisoned_target_summary["asr_post"],
@@ -946,15 +996,15 @@ class SurrogateAttackPipeline:
             summary["metrics"]["defended_micro_acc"] = defend_result["eval"]["micro_acc"]
             summary["metrics"]["defended_macro_f1"] = defend_result["eval"]["metrics"]["macro_f1"]
             summary["metrics"]["defended_total_eval"] = defend_result["eval"]["total_eval"]
-            summary["metrics"]["defended_target_eval_count"] = defended_target_summary["target_eval_count"]
-            summary["metrics"]["defended_target_samples"] = defended_target_summary["samples_with_targets"]
+            summary["metrics"]["defended_target_nodes_evaluated"] = defended_target_summary["target_eval_count"]
+            summary["metrics"]["defended_target_graphs"] = defended_target_summary["samples_with_targets"]
             summary["metrics"]["defended_target_asr_good"] = defended_target_summary["asr_good"]
             summary["metrics"]["defended_target_asr_bad"] = defended_target_summary["asr_bad"]
             summary["metrics"]["defended_target_asr_post"] = defended_target_summary["asr_post"]
             summary["metrics"]["defended_target_asr_on_attacked"] = defended_target_summary["asr_on_attacked"]
             summary["metrics"]["defended_target_nfr"] = defended_target_summary["nfr"]
-            summary["metrics"]["defense_recovery_target_eval_count"] = recovery_summary["target_eval_count"]
-            summary["metrics"]["defense_recovery_target_samples"] = recovery_summary["samples_with_targets"]
+            summary["metrics"]["defense_recovery_target_nodes_evaluated"] = recovery_summary["target_eval_count"]
+            summary["metrics"]["defense_recovery_target_graphs"] = recovery_summary["samples_with_targets"]
             summary["metrics"]["defense_recovery_attack_success_pos"] = recovery_summary["attack_success_pos"]
             summary["metrics"]["defense_recovery_attack_success_pos_recovered"] = recovery_summary[
                 "attack_success_pos_recovered"
@@ -965,6 +1015,14 @@ class SurrogateAttackPipeline:
                 "target_summary": defended_target_summary,
                 "recovery_summary": recovery_summary,
             }
+
+        full_metrics = dict(summary["metrics"])
+        summary["details"]["debug_metrics_full"] = full_metrics
+        summary["metrics"] = self._compact_metrics(
+            full_metrics=full_metrics,
+            protocol="poison_then_defend",
+            include_defended=(include_defended and defend_result is not None),
+        )
 
         out_dir = self._resolve_output_dir()
         tag = f"{split}_surrogate_poison_then_defend" if include_defended else f"{split}_surrogate_attack"
