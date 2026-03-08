@@ -44,3 +44,4 @@ trial_base_seed: 0
 save_trial_csv: true
 trial_csv_name: 'attack_defend_per_trial.csv'
 summary_csv_name: 'attack_defend_summary.csv'
+output_dir: './outputs'

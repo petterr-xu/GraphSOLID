@@ -102,24 +102,6 @@ def _build_summary_rows(trial_rows):
     return out
 
 
-def _resolve_pipeline_output_dir(datamodule):
-    dm = datamodule
-    if hasattr(dm, "cfg"):
-        cfg = dm.cfg
-        for path_attr in ["out_dir", "output_dir", "log_dir", "save_dir", "result_dir"]:
-            if hasattr(cfg, path_attr):
-                d = getattr(cfg, path_attr)
-                if isinstance(d, str) and d:
-                    os.makedirs(d, exist_ok=True)
-                    return d
-    if hasattr(dm, "root") and isinstance(dm.root, str) and dm.root:
-        d = os.path.join(dm.root, "pipeline_outputs")
-        os.makedirs(d, exist_ok=True)
-        return d
-    d = os.path.join(os.getcwd(), "pipeline_outputs")
-    os.makedirs(d, exist_ok=True)
-    return d
-
 def load_imb_data(dataset, imb_ratio = 0, keep_edge=True,device='cpu'):
     root_path = osp.dirname(osp.realpath(__file__))
     loader = GraphDataLoader()
@@ -335,7 +317,7 @@ def main(cfg: DictConfig):
         print(last_result["metrics"])
 
     if save_trial_csv and len(trial_rows) > 0:
-        out_dir = _resolve_pipeline_output_dir(datamodule)
+        out_dir = cfg.general.output_dir if hasattr(cfg.general, "output_dir") else "./outputs"
         trial_csv_path = os.path.join(out_dir, trial_csv_name)
         summary_csv_path = os.path.join(out_dir, summary_csv_name)
         _write_csv(trial_csv_path, trial_rows)
