@@ -37,3 +37,10 @@ perturb_ratio: 0.15 # deprecated, use sub_edge_perturb_ratio and general_edge_pe
 ctrl_nodes_size: 10
 sub_edge_perturb_ratio: 0.75
 general_edge_perturb_ratio: 0.15
+
+# repeated experiment settings (for main_attack_defend.py)
+trial_runs: 10
+trial_base_seed: 0
+save_trial_csv: true
+trial_csv_name: 'attack_defend_per_trial.csv'
+summary_csv_name: 'attack_defend_summary.csv'
