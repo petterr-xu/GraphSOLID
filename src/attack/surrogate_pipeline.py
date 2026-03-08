@@ -106,6 +106,7 @@ class SurrogateAttackPipeline:
                 "defended_macro_f1",
                 "defended_target_asr_on_attacked",
                 "defense_recovery_rate_pos",
+                "defense_collateral_error_rate",
             ]
         else:
             keys = [
@@ -122,6 +123,7 @@ class SurrogateAttackPipeline:
                 "defended_macro_f1",
                 "defended_target_asr_on_attacked",
                 "defense_recovery_rate_pos",
+                "defense_collateral_error_rate",
             ]
 
         out = {k: full_metrics[k] for k in keys if k in full_metrics}
@@ -322,6 +324,54 @@ class SurrogateAttackPipeline:
             "recovery_rate_pos": recovery_rate_pos,
         }
 
+    @classmethod
+    def _compute_defense_collateral_on_non_targets(
+        cls,
+        clean_res: Dict[str, Any],
+        defended_res: Dict[str, Any],
+        attack_nodes: Optional[torch.Tensor],
+    ) -> Dict[str, Any]:
+        empty = {
+            "non_target_eval_count": 0,
+            "clean_correct_non_target_count": 0,
+            "clean_correct_non_target_to_wrong_after_defense": 0,
+            "collateral_error_rate": float("nan"),
+        }
+
+        clean_map = cls._build_pred_map(clean_res)
+        defended_map = cls._build_pred_map(defended_res)
+        true_map = cls._build_true_map(clean_res)
+        common_nodes = [n for n in clean_map.keys() if (n in defended_map and n in true_map)]
+        if len(common_nodes) == 0:
+            return empty
+
+        attacked_set = set()
+        if attack_nodes is not None and attack_nodes.numel() > 0:
+            attacked_set = {int(n) for n in attack_nodes.tolist()}
+
+        non_target_nodes = [n for n in common_nodes if n not in attacked_set]
+        if len(non_target_nodes) == 0:
+            return empty
+
+        clean_pred = torch.tensor([clean_map[n] for n in non_target_nodes], dtype=torch.long)
+        defended_pred = torch.tensor([defended_map[n] for n in non_target_nodes], dtype=torch.long)
+        y_true = torch.tensor([true_map[n] for n in non_target_nodes], dtype=torch.long)
+
+        clean_correct = clean_pred == y_true
+        clean_correct_count = int(clean_correct.sum().item())
+        clean_correct_to_wrong = int((clean_correct & (defended_pred != y_true)).sum().item())
+        collateral_error_rate = (
+            float("nan")
+            if clean_correct_count == 0
+            else (clean_correct_to_wrong / clean_correct_count)
+        )
+        return {
+            "non_target_eval_count": int(len(non_target_nodes)),
+            "clean_correct_non_target_count": clean_correct_count,
+            "clean_correct_non_target_to_wrong_after_defense": clean_correct_to_wrong,
+            "collateral_error_rate": collateral_error_rate,
+        }
+
     @staticmethod
     def _init_target_totals() -> Dict[str, float]:
         return {
@@ -418,6 +468,44 @@ class SurrogateAttackPipeline:
             "attack_success_pos": atk_success,
             "attack_success_pos_recovered": atk_recovered,
             "recovery_rate_pos": recovery_rate,
+        }
+
+    @staticmethod
+    def _init_collateral_totals() -> Dict[str, float]:
+        return {
+            "samples_with_non_targets": 0,
+            "non_target_eval_count": 0,
+            "clean_correct_non_target_count": 0,
+            "clean_correct_non_target_to_wrong_after_defense": 0,
+        }
+
+    @staticmethod
+    def _accumulate_collateral_totals(
+        totals: Dict[str, float],
+        sample_metrics: Optional[Dict[str, Any]],
+    ) -> None:
+        if sample_metrics is None:
+            return
+        cnt = int(sample_metrics.get("non_target_eval_count", 0))
+        if cnt <= 0:
+            return
+        totals["samples_with_non_targets"] += 1
+        totals["non_target_eval_count"] += cnt
+        totals["clean_correct_non_target_count"] += int(sample_metrics.get("clean_correct_non_target_count", 0))
+        totals["clean_correct_non_target_to_wrong_after_defense"] += int(
+            sample_metrics.get("clean_correct_non_target_to_wrong_after_defense", 0)
+        )
+
+    @staticmethod
+    def _finalize_collateral_totals(totals: Dict[str, float]) -> Dict[str, Any]:
+        denom = int(totals["clean_correct_non_target_count"])
+        numer = int(totals["clean_correct_non_target_to_wrong_after_defense"])
+        return {
+            "samples_with_non_targets": int(totals["samples_with_non_targets"]),
+            "non_target_eval_count": int(totals["non_target_eval_count"]),
+            "clean_correct_non_target_count": denom,
+            "clean_correct_non_target_to_wrong_after_defense": numer,
+            "collateral_error_rate": (float("nan") if denom == 0 else (numer / denom)),
         }
 
     def _train_engine(
@@ -577,6 +665,7 @@ class SurrogateAttackPipeline:
         attacked_target_totals = self._init_target_totals()
         defended_target_totals = self._init_target_totals()
         recovery_totals = self._init_recovery_totals()
+        collateral_totals = self._init_collateral_totals()
 
         for i in tqdm(range(total), desc=f"Eval {split} (minta-evasion)"):
             g = ds[i]
@@ -655,6 +744,7 @@ class SurrogateAttackPipeline:
                 )
                 defended_target_metrics = None
                 recovery_metrics = None
+                collateral_metrics = None
                 if attack_nodes is not None and attack_target_type == target_type:
                     defended_target_metrics = self._compute_transition_metrics_on_targets(
                         baseline_res=clean_res,
@@ -671,6 +761,12 @@ class SurrogateAttackPipeline:
                     )
                     self._accumulate_target_totals(defended_target_totals, defended_target_metrics)
                     self._accumulate_recovery_totals(recovery_totals, recovery_metrics)
+                    collateral_metrics = self._compute_defense_collateral_on_non_targets(
+                        clean_res=clean_res,
+                        defended_res=defended_res,
+                        attack_nodes=attack_nodes,
+                    )
+                    self._accumulate_collateral_totals(collateral_totals, collateral_metrics)
                 defended_per_sample.append(
                     {
                         "sample_id": i,
@@ -684,6 +780,7 @@ class SurrogateAttackPipeline:
                         "node_idx": defended_res["node_idx"],
                         "target_metrics": defended_target_metrics,
                         "recovery_metrics": recovery_metrics,
+                        "collateral_metrics": collateral_metrics,
                     }
                 )
 
@@ -713,6 +810,7 @@ class SurrogateAttackPipeline:
         attacked_target_summary = self._finalize_target_totals(attacked_target_totals)
         defended_target_summary = self._finalize_target_totals(defended_target_totals)
         recovery_summary = self._finalize_recovery_totals(recovery_totals)
+        collateral_summary = self._finalize_collateral_totals(collateral_totals)
 
         summary: Dict[str, Any] = {
             "split": split,
@@ -783,12 +881,21 @@ class SurrogateAttackPipeline:
                 "attack_success_pos_recovered"
             ]
             summary["metrics"]["defense_recovery_rate_pos"] = recovery_summary["recovery_rate_pos"]
+            summary["metrics"]["defense_collateral_non_target_nodes_evaluated"] = collateral_summary["non_target_eval_count"]
+            summary["metrics"]["defense_collateral_clean_correct_non_target_count"] = collateral_summary[
+                "clean_correct_non_target_count"
+            ]
+            summary["metrics"]["defense_collateral_clean_correct_non_target_to_wrong"] = collateral_summary[
+                "clean_correct_non_target_to_wrong_after_defense"
+            ]
+            summary["metrics"]["defense_collateral_error_rate"] = collateral_summary["collateral_error_rate"]
             summary["details"]["defended"] = {
                 "micro_acc": defended_micro_acc,
                 "total_eval": int(defended_total_eval),
                 "total_correct": int(defended_total_correct),
                 "target_summary": defended_target_summary,
                 "recovery_summary": recovery_summary,
+                "collateral_summary": collateral_summary,
                 "per_sample": defended_per_sample,
             }
 
@@ -917,6 +1024,7 @@ class SurrogateAttackPipeline:
         poisoned_target_totals = self._init_target_totals()
         defended_target_totals = self._init_target_totals()
         recovery_totals = self._init_recovery_totals()
+        collateral_totals = self._init_collateral_totals()
 
         for i in range(len(poisoned_ds)):
             clean_eval = clean_result["eval"]["per_sample"][i]
@@ -940,6 +1048,7 @@ class SurrogateAttackPipeline:
                 defend_eval = defend_result["eval"]["per_sample"][i]
                 defended_target_metrics = None
                 recovery_metrics = None
+                collateral_metrics = None
                 if attack_nodes is not None and attack_target_type == target_type:
                     defended_target_metrics = self._compute_transition_metrics_on_targets(
                         baseline_res=clean_eval,
@@ -956,13 +1065,21 @@ class SurrogateAttackPipeline:
                     )
                     self._accumulate_target_totals(defended_target_totals, defended_target_metrics)
                     self._accumulate_recovery_totals(recovery_totals, recovery_metrics)
+                    collateral_metrics = self._compute_defense_collateral_on_non_targets(
+                        clean_res=clean_eval,
+                        defended_res=defend_eval,
+                        attack_nodes=attack_nodes,
+                    )
+                    self._accumulate_collateral_totals(collateral_totals, collateral_metrics)
 
                 defend_eval["target_metrics"] = defended_target_metrics
                 defend_eval["recovery_metrics"] = recovery_metrics
+                defend_eval["collateral_metrics"] = collateral_metrics
 
         poisoned_target_summary = self._finalize_target_totals(poisoned_target_totals)
         defended_target_summary = self._finalize_target_totals(defended_target_totals)
         recovery_summary = self._finalize_recovery_totals(recovery_totals)
+        collateral_summary = self._finalize_collateral_totals(collateral_totals)
 
         summary: Dict[str, Any] = {
             "split": split,
@@ -1010,10 +1127,19 @@ class SurrogateAttackPipeline:
                 "attack_success_pos_recovered"
             ]
             summary["metrics"]["defense_recovery_rate_pos"] = recovery_summary["recovery_rate_pos"]
+            summary["metrics"]["defense_collateral_non_target_nodes_evaluated"] = collateral_summary["non_target_eval_count"]
+            summary["metrics"]["defense_collateral_clean_correct_non_target_count"] = collateral_summary[
+                "clean_correct_non_target_count"
+            ]
+            summary["metrics"]["defense_collateral_clean_correct_non_target_to_wrong"] = collateral_summary[
+                "clean_correct_non_target_to_wrong_after_defense"
+            ]
+            summary["metrics"]["defense_collateral_error_rate"] = collateral_summary["collateral_error_rate"]
             summary["details"]["defended"] = {
                 **defend_result,
                 "target_summary": defended_target_summary,
                 "recovery_summary": recovery_summary,
+                "collateral_summary": collateral_summary,
             }
 
         full_metrics = dict(summary["metrics"])
