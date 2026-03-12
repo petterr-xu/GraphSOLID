@@ -125,33 +125,44 @@ def main(cfg: DictConfig):
         raise NotImplementedError("Unknown dataset {}".format(cfg["dataset"]))
 
     utils.create_folders(cfg)
-    path = '/root/autodl-tmp/outputs/2026-01-25/12-38-21-graph-tf-model/checkpoints/graph-tf-model/last-v1.ckpt'
-    model = DiscreteDenoisingDiffusion.load_from_checkpoint(path, **model_kwargs)
-    model = model.to('cuda:0')
-    loader = datamodule.test_dataloader()
-    for idx, batch in enumerate(loader):
-        print(f"Processing batch {idx}")
-        batch = batch.to('cuda:0')
-        
-        # 1. 运行净化：得到的是密集的 [bs, n] 和 [bs, n, n]
-        final_output, node_mask = model.purify(batch, t_purify_steps=10)
-        
-        # 2. 计算这个 batch 中每个图的实际节点数
-        # node_mask 形状为 [bs, n]，每一行 True 的个数就是该图的实际节点数
-        actual_nodes_counts = node_mask.sum(dim=1).long() 
-        
-        # 3. 遍历 Batch，提取单个图
-        for i in range(final_output.X.shape[0]):
-            n = actual_nodes_counts[i]
-            
-            # 截取非 Padding 的有效部分
-            single_graph_nodes = final_output.X[i, :n].cpu()      # 节点类别索引
-            single_graph_edges = final_output.E[i, :n, :n].cpu()  # 边类别索引矩阵
-            
-            print(f" - Graph {i} inside batch: Nodes={n}, X_shape={single_graph_nodes.shape}")
-            
-            # 这里你可以根据需要将 single_graph_nodes/edges 转回 PyG Data 对象
-            # 或者直接进行后续的分类测试
+    model = DiscreteDenoisingDiffusion(cfg=cfg, **model_kwargs)
+
+    callbacks = []
+    if cfg.train.save_model:
+        checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
+                                              filename='{epoch}',
+                                              monitor='val/epoch_NLL',
+                                              save_top_k=5,
+                                              mode='min',
+                                              every_n_epochs=1)
+        last_ckpt_save = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}", filename='last', every_n_epochs=1)
+        callbacks.append(last_ckpt_save)
+        callbacks.append(checkpoint_callback)
+
+    if cfg.train.ema_decay > 0:
+        ema_callback = utils.EMA(decay=cfg.train.ema_decay)
+        callbacks.append(ema_callback)
+
+    name = cfg.general.name
+    if name == 'debug':
+        print("[WARNING]: Run is called 'debug' -- it will run with fast_dev_run. ")
+
+    use_gpu = cfg.general.gpus > 0 and torch.cuda.is_available()
+    trainer = Trainer(gradient_clip_val=cfg.train.clip_grad,
+                    #   strategy="ddp_find_unused_parameters_true",  # Needed to load old checkpoints
+                      accelerator='gpu' if use_gpu else 'cpu',
+                      devices=cfg.general.gpus if use_gpu else 1,
+                      max_epochs=cfg.train.n_epochs,
+                      check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
+                      fast_dev_run=cfg.general.name == 'debug',
+                      enable_progress_bar=False,
+                      callbacks=callbacks,
+                      log_every_n_steps=50 if name != 'debug' else 1,
+                      logger = [])
+
+    trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.general.resume)
+    if cfg.general.name not in ['debug', 'test']:
+        trainer.test(model, datamodule=datamodule)
 
 if __name__ == '__main__':
     main()
