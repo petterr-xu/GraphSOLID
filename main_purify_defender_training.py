@@ -93,7 +93,7 @@ def main(cfg: DictConfig):
 
 
         train_metrics = TrainAbstractMetricsDiscrete()
-        visualization_tools = NonMolecularVisualization()
+        visualization_tools = None
 
         '''
         todo: extra features for hetero graph
