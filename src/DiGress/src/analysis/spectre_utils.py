@@ -896,6 +896,81 @@ class SBMSamplingMetrics(SpectreSamplingMetrics):
                          compute_emd=False,
                          metrics_list=['degree', 'clustering', 'orbit', 'spectre', 'sbm'])
 
+class AmPdSamplingMetrics(nn.Module):
+    def __init__(self, datamodule, cfg):
+        super().__init__()
+        self.cfg = cfg
+        # 预加载真实图用于对比 (EMD 距离计算)
+        self.train_graphs = self.loader_to_nx(datamodule.train_dataloader())
+        self.val_graphs = self.loader_to_nx(datamodule.val_dataloader())
+        
+        # 根据配置决定计算哪些指标，AmPd 建议关注结构指标
+        self.metrics_list = ['degree', 'clustering', 'spectre'] 
+        self.compute_emd = True # 4090 性能足够计算 EMD 距离
+
+    def loader_to_nx(self, loader):
+        networkx_graphs = []
+        for batch in loader:
+            # 处理 PyG Batch 对象
+            data_list = batch.to_data_list()
+            for data in data_list:
+                # 转换为 NetworkX 格式。注意：如果是异构图，需先在 datamodule 中转为同构
+                nx_g = to_networkx(data, to_undirected=True, remove_self_loops=True)
+                networkx_graphs.append(nx_g)
+        return networkx_graphs
+
+    def forward(self, generated_graphs: list, name, current_epoch, val_counter, local_rank, test=False):
+        """
+        generated_graphs: 列表，每个元素是一个元组 (node_types, edge_types)
+        """
+        ref_graphs = self.val_graphs if not test else self.train_graphs # 验证时对比验证集
+        
+        if local_rank == 0:
+            print(f"Computing YelpChi metrics for {len(generated_graphs)} graphs...")
+
+        # 1. 将生成的张量转换为 NetworkX 图对象
+        gen_nx_graphs = []
+        for graph in generated_graphs:
+            _, edge_types = graph
+            # edge_types 在离散扩散中通常是 [N, N] 的稠密矩阵
+            # 类别 0 是无边，类别 1 是有边
+            adj = (edge_types > 0).cpu().numpy() 
+            gen_nx_graphs.append(nx.from_numpy_array(adj))
+
+        to_log = {}
+
+        # 2. 计算度分布 (Degree Distribution) - 衡量图的骨架是否相似
+        if 'degree' in self.metrics_list:
+            to_log['m/degree'] = degree_stats(ref_graphs, gen_nx_graphs, is_parallel=True)
+
+        # 3. 计算聚集系数 (Clustering Coefficient) - 衡量社区结构
+        if 'clustering' in self.metrics_list:
+            to_log['m/clustering'] = clustering_stats(ref_graphs, gen_nx_graphs, is_parallel=True)
+
+        # 4. 计算谱统计 (Spectral Stats) - 衡量全局结构相似度
+        if 'spectre' in self.metrics_list:
+            to_log['m/spectre'] = spectral_stats(ref_graphs, gen_nx_graphs, is_parallel=True)
+
+        # 5. 计算唯一性与多样性 (Unique & Non-Isomorphic)
+        # 这对于生成模型非常重要，防止模型只生成一模一样的“欺诈模式”
+        frac_unique, frac_unique_iso, _ = eval_fraction_unique_non_isomorphic_valid(
+            gen_nx_graphs, self.train_graphs, lambda x: True # YelpChi 没有特定的“合法性”检查函数
+        )
+        to_log.update({
+            'm/frac_unique': frac_unique,
+            'm/frac_unique_non_iso': frac_unique_iso
+        })
+
+        # 6. 写入 WandB
+        if local_rank == 0:
+            print(f"Epoch {current_epoch} Metrics:", to_log)
+            if wandb.run:
+                wandb.log(to_log, commit=False)
+
+    def reset(self):
+        # 每一轮验证开始前重置（如果需要累积指标的话）
+        pass
+
 class YelpChiSamplingMetrics(nn.Module):
     def __init__(self, datamodule, cfg):
         super().__init__()

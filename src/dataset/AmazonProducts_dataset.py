@@ -1,5 +1,5 @@
 from torch_geometric.data import HeteroData
-from .hetero_dataset import HeteroDataset, MultiviewDataset, HeteroDatasetInfos
+from .hetero_dataset import HeteroDataset, MultiviewDataset, HeteroDatasetInfos, HeteroDataModule
 
 
 
@@ -37,6 +37,10 @@ class AmPdHeteroDataset(HeteroDataset):
                         rebalance_train_majority,
                         train_majority_ratio_cap)
 
-class AmPdDataModule(HeteroDatasetInfos):
+class AmPdDataModule(HeteroDataModule):
     def __init__(self, cfg, hetero_graph=None):
         super().__init__(cfg, hetero_graph)
+        
+class AmPdDatasetInfos(HeteroDatasetInfos):
+    def __init__(self,datamodule, cfg):
+        super().__init__(datamodule, cfg)

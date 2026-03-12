@@ -152,19 +152,24 @@ def main(cfg: DictConfig):
     hetero_data = load_imb_data(dataset_config["name"])
     if dataset_config["name"] in ['YelpChi', 'Amazon-Products']:
         from src.dataset.YelpChi_dataset import YelpChihDataModule, YelpChiDatasetInfos
+        from src.dataset.AmazonProducts_dataset import AmPdDataModule, AmPdDatasetInfos
         from src.DiGress.src.metrics.abstract_metrics import TrainAbstractMetricsDiscrete
         from src.DiGress.src.analysis.visualization import NonMolecularVisualization
-        from src.DiGress.src.analysis.spectre_utils import YelpChiSamplingMetrics
+        from src.DiGress.src.analysis.spectre_utils import YelpChiSamplingMetrics, AmPdSamplingMetrics
         from src.DiGress.src.diffusion.extra_features import ExtraFeatures, DummyExtraFeatures
         from src.DiGress.src.metrics.abstract_metrics import TrainAbstractMetricsDiscrete, TrainAbstractMetrics
-        datamodule = YelpChihDataModule(cfg, hetero_data.g)
         if(dataset_config["name"]=='YelpChi'):
+            datamodule = YelpChihDataModule(cfg, hetero_data.g)
             sampling_metrics = YelpChiSamplingMetrics(datamodule,cfg)
+            dataset_infos = YelpChiDatasetInfos(datamodule, cfg)
+        elif(dataset_config["name"]=='Amazon-Products'):
+            datamodule = AmPdDataModule(cfg, hetero_data.g)
+            sampling_metrics = AmPdSamplingMetrics(datamodule, cfg)
+            dataset_infos = AmPdDatasetInfos(datamodule, cfg)
         else:
-            sampling_metrics = None # todo
+            raise NotImplementedError("Unknown dataset {}".format(dataset_config["name"]))
 
         # dataset_infos = YelpChiSubgraphDatasetInfos(datamodule, cfg)
-        dataset_infos = YelpChiDatasetInfos(datamodule, cfg)
         train_metrics = TrainAbstractMetricsDiscrete()
         visualization_tools = None # NonMolecularVisualization()
 
