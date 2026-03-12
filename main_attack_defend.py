@@ -151,7 +151,7 @@ def main(cfg: DictConfig):
     dataset_config = cfg["dataset"]
     hetero_data = load_imb_data(dataset_config["name"])
     if dataset_config["name"] in ['YelpChi', 'Amazon-Products']:
-        from src.dataset.YelpChi_multiview_dataset import YelpChihDataModule, YelpChiDatasetInfos
+        from src.dataset.YelpChi_dataset import YelpChihDataModule, YelpChiDatasetInfos
         from src.DiGress.src.metrics.abstract_metrics import TrainAbstractMetricsDiscrete
         from src.DiGress.src.analysis.visualization import NonMolecularVisualization
         from src.DiGress.src.analysis.spectre_utils import YelpChiSamplingMetrics
