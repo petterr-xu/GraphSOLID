@@ -106,7 +106,8 @@ class GDDPMblock(nn.Module):
             mean_cond = mean
             eps = torch.randn(xt.shape, device=xt.device)
             # del eps_theta
-        return mean_cond + (var ** .5) * eps
+            nonzero_mask = (t != 0).float().view(-1, *([1] * (xt.dim() - 1)))
+        return mean + nonzero_mask * (var ** 0.5) * eps
 
     def sampling(self,guidance_scale,x_t:torch.Tensor,y:torch.Tensor, padding=(0,0,0,0),save_frames=False, show_pbar=False,device="cuda:0"):
         """采样生成
