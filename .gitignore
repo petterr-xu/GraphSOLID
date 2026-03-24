@@ -8,3 +8,4 @@ history_data/
 torch_geo/
 *.log
 .vscode
+*.out

@@ -167,7 +167,7 @@ class SolidTrainer:
             print(f"Loaded pre-trained encoder, decoder and centloss model from {ckpt_path}")
         else:
             best_loss = float('inf')
-            patience = 10
+            patience = 5
             patience_count = 0
             patience_beta = 1e-3
             pre_epoch = 2000
@@ -531,7 +531,7 @@ class SolidTrainer:
                 
         return accs, baccs, f1s, measure_result, recall
     
-    def train_classifier_vanilla(self, epochs = 1000, weights=None):
+    def train_classifier_vanilla(self, epochs = 800, weights=None):
         best_val_acc = test_acc = best_val_f1 = best_val_bacc = best_val_acc_f1 = -1
         best_measure = None
         # 初始化保存数据的列表
@@ -544,7 +544,7 @@ class SolidTrainer:
 
         with tqdm(total=epochs, desc="Classifier Training Progress") as pbar:
             for e in range(epochs):
-                self.train_classifier_vanilla_oneloop()
+                self.train_classifier_vanilla_oneloop(weights)
                 accs, bacc, f1s, measure_result, recall = self.metric_classifier()
                 train_acc, val_acc, tmp_test_acc = accs
                 train_f1, val_f1, tmp_test_f1 = f1s
@@ -581,5 +581,5 @@ class SolidTrainer:
 
         minority_recall = best_recall[self.minority_mask]
         majority_recall = best_recall[~self.minority_mask]
-        return best_val_acc, best_val_f1, test_acc, test_bacc, test_f1, best_measure, minority_recall, majority_recall
+        return best_val_acc, best_val_f1, test_acc, test_bacc, test_f1, best_measure, best_recall, minority_recall, majority_recall
     

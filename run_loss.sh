@@ -1,0 +1,19 @@
+python main_heterosolid.py --dataset YelpChi --is_vanilla --loss_type focal --net HeteroSAGE
+python main_heterosolid.py --dataset YelpChi --is_vanilla --loss_type ce --net HeteroSAGE
+python main_heterosolid.py --dataset YelpChi --is_vanilla --loss_type re --net HeteroSAGE
+python main_heterosolid.py --dataset YelpChi --is_vanilla --loss_type focal --net HeteroGAT
+python main_heterosolid.py --dataset YelpChi --is_vanilla --loss_type ce --net HeteroGAT
+python main_heterosolid.py --dataset YelpChi --is_vanilla --loss_type re --net HeteroGAT
+python main_heterosolid.py --dataset YelpChi --is_vanilla --loss_type focal --net RGCN
+python main_heterosolid.py --dataset YelpChi --is_vanilla --loss_type ce --net RGCN
+python main_heterosolid.py --dataset YelpChi --is_vanilla --loss_type re --net RGCN
+
+python main_heterosolid.py --dataset Amazon-Products --is_vanilla --loss_type focal --net HeteroSAGE
+python main_heterosolid.py --dataset Amazon-Products --is_vanilla --loss_type ce --net HeteroSAGE
+python main_heterosolid.py --dataset Amazon-Products --is_vanilla --loss_type re --net HeteroSAGE
+python main_heterosolid.py --dataset Amazon-Products --is_vanilla --loss_type focal --net HeteroGAT
+python main_heterosolid.py --dataset Amazon-Products --is_vanilla --loss_type ce --net HeteroGAT
+python main_heterosolid.py --dataset Amazon-Products --is_vanilla --loss_type re --net HeteroGAT
+python main_heterosolid.py --dataset Amazon-Products --is_vanilla --loss_type focal --net RGCN
+python main_heterosolid.py --dataset Amazon-Products --is_vanilla --loss_type ce --net RGCN
+python main_heterosolid.py --dataset Amazon-Products --is_vanilla --loss_type re --net RGCN
