@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from src.dataset.abstract_dataset import AbstractDataModule
 from src.models.classifier_engine import ClassifierEngine
-from .attacker import Attacker, MintaAttacker
+from .attacker import Attacker
 from .defender import Defender
 
 
@@ -91,7 +91,7 @@ class SurrogateAttackPipeline:
 
     @staticmethod
     def _compact_metrics(full_metrics: Dict[str, Any], protocol: str, include_defended: bool) -> Dict[str, Any]:
-        if protocol == "minta_evasion":
+        if protocol == "evasion":
             keys = [
                 "clean_micro_acc",
                 "attacked_micro_acc",
@@ -163,18 +163,14 @@ class SurrogateAttackPipeline:
     @staticmethod
     def _extract_attack_target_info(graph, default_target_type: str):
         target_type = default_target_type
-        for attr in ["attack_target_type", "minta_target_type"]:
-            if hasattr(graph, attr):
-                v = getattr(graph, attr)
-                if isinstance(v, str) and len(v) > 0:
-                    target_type = v
-                    break
+        if hasattr(graph, "attack_target_type"):
+            v = getattr(graph, "attack_target_type")
+            if isinstance(v, str) and len(v) > 0:
+                target_type = v
 
         nodes = None
-        for attr in ["attack_target_nodes", "minta_adv_nodes", "adv_nodes_test"]:
-            if hasattr(graph, attr):
-                nodes = getattr(graph, attr)
-                break
+        if hasattr(graph, "attack_target_nodes"):
+            nodes = getattr(graph, "attack_target_nodes")
 
         if nodes is None:
             return None, target_type
@@ -598,7 +594,7 @@ class SurrogateAttackPipeline:
         res["metrics"] = self._metrics_from_confusion(res["confusion"], total_eval=res["num_eval"])
         return res
 
-    def _run_minta_evasion(
+    def _run_evasion(
         self,
         split: str = "test",
         train_split: str = "train",
@@ -612,12 +608,7 @@ class SurrogateAttackPipeline:
         early_stop_min_delta: float = 1e-3,
         train_log_interval: int = 10,
     ) -> Dict[str, Any]:
-        """
-        MintA-aligned evaluation protocol:
-        - Train ONE victim model on clean train split (optional if train_epochs=0),
-        - Keep victim fixed,
-        - Compare clean/attacked(/defended) predictions on the same model.
-        """
+        """Generic evasion evaluation on a fixed victim model."""
         ds = self._get_split_dataset(split)
         sample0 = ds[0] if len(ds) > 0 else None
         if sample0 is None:
@@ -642,9 +633,11 @@ class SurrogateAttackPipeline:
                 log_interval=train_log_interval,
             )
 
-        if isinstance(self.attacker, MintaAttacker):
+        if hasattr(self.attacker, "victim_model"):
             self.attacker.victim_model = self.classifier_engine.model
+        if hasattr(self.attacker, "victim_engine"):
             self.attacker.victim_engine = self.classifier_engine
+        if hasattr(self.attacker, "device"):
             self.attacker.device = self.device
 
         total = len(ds)
@@ -667,7 +660,7 @@ class SurrogateAttackPipeline:
         recovery_totals = self._init_recovery_totals()
         collateral_totals = self._init_collateral_totals()
 
-        for i in tqdm(range(total), desc=f"Eval {split} (minta-evasion)"):
+        for i in tqdm(range(total), desc=f"Eval {split} (evasion)"):
             g = ds[i]
 
             clean_res = self._eval_classifier_on_graph(g, split=eval_split, target_type=target_type)
@@ -786,7 +779,7 @@ class SurrogateAttackPipeline:
 
             if log_every and (i + 1) % log_every == 0:
                 msg = (
-                    f"[minta_evasion {split} #{i + 1}/{total}] "
+                    f"[evasion {split} #{i + 1}/{total}] "
                     f"clean={clean_res['acc']:.4f} attacked={attacked_res['acc']:.4f}"
                 )
                 if include_defended and len(defended_per_sample) > 0:
@@ -816,7 +809,7 @@ class SurrogateAttackPipeline:
             "split": split,
             "eval_split": eval_split,
             "train_split": train_split,
-            "protocol": "minta_evasion",
+            "protocol": "evasion",
             "target_type": target_type,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "train_history": train_history,
@@ -834,17 +827,6 @@ class SurrogateAttackPipeline:
                 "attacked_target_asr_post": attacked_target_summary["asr_post"],
                 "attacked_target_asr_on_attacked": attacked_target_summary["asr_on_attacked"],
                 "attacked_target_nfr": attacked_target_summary["nfr"],
-                # compatibility aliases
-                "poisoned_micro_acc": attacked_micro_acc,
-                "poisoned_macro_f1": attacked_metrics["macro_f1"],
-                "poisoned_total_eval": int(attacked_total_eval),
-                "poisoned_target_nodes_evaluated": attacked_target_summary["target_eval_count"],
-                "poisoned_target_graphs": attacked_target_summary["samples_with_targets"],
-                "poisoned_target_asr_good": attacked_target_summary["asr_good"],
-                "poisoned_target_asr_bad": attacked_target_summary["asr_bad"],
-                "poisoned_target_asr_post": attacked_target_summary["asr_post"],
-                "poisoned_target_asr_on_attacked": attacked_target_summary["asr_on_attacked"],
-                "poisoned_target_nfr": attacked_target_summary["nfr"],
             },
             "details": {
                 "clean": {
@@ -901,14 +883,10 @@ class SurrogateAttackPipeline:
 
         full_metrics = dict(summary["metrics"])
         summary["details"]["debug_metrics_full"] = full_metrics
-        summary["metrics"] = self._compact_metrics(
-            full_metrics=full_metrics,
-            protocol="minta_evasion",
-            include_defended=include_defended,
-        )
+        summary["metrics"] = self._compact_metrics(full_metrics=full_metrics, protocol="evasion", include_defended=include_defended)
 
         out_dir = self._resolve_output_dir()
-        tag = f"{split}_surrogate_minta_evasion_defended" if include_defended else f"{split}_surrogate_minta_evasion"
+        tag = f"{split}_surrogate_evasion_defended" if include_defended else f"{split}_surrogate_evasion"
         pt_path = os.path.join(out_dir, f"{tag}_results.pt")
         json_path = os.path.join(out_dir, f"{tag}_metrics.json")
         torch.save(summary, pt_path)
@@ -955,12 +933,12 @@ class SurrogateAttackPipeline:
         early_stop_min_delta: float = 1e-3,
         train_log_interval: int = 10,
     ) -> Dict[str, Any]:
-        if protocol not in {"auto", "poison_train", "minta_evasion"}:
+        if protocol not in {"auto", "poison_train", "evasion"}:
             raise ValueError(f"Unknown protocol '{protocol}'.")
         if protocol == "auto":
-            protocol = "minta_evasion" if isinstance(self.attacker, MintaAttacker) else "poison_train"
-        if protocol == "minta_evasion":
-            return self._run_minta_evasion(
+            protocol = getattr(self.attacker, "attack_mode", "poison_train")
+        if protocol == "evasion":
+            return self._run_evasion(
                 split=split,
                 train_split=train_split,
                 train_epochs=train_epochs,
@@ -1210,7 +1188,7 @@ class SurrogateAttackPipeline:
             train_log_interval=train_log_interval,
         )
 
-    def minta_evasion(
+    def evasion(
         self,
         split: str = "test",
         train_split: str = "train",
@@ -1224,9 +1202,6 @@ class SurrogateAttackPipeline:
         early_stop_min_delta: float = 1e-3,
         train_log_interval: int = 10,
     ) -> Dict[str, Any]:
-        """
-        Wrapper for MintA-aligned evasion protocol.
-        """
         return self.run(
             split=split,
             train_epochs=train_epochs,
@@ -1235,7 +1210,7 @@ class SurrogateAttackPipeline:
             eval_split=eval_split,
             include_defended=include_defended,
             positive_label=positive_label,
-            protocol="minta_evasion",
+            protocol="evasion",
             train_split=train_split,
             early_stop_patience=early_stop_patience,
             early_stop_min_delta=early_stop_min_delta,
@@ -1255,10 +1230,7 @@ class SurrogateAttackPipeline:
         early_stop_min_delta: float = 1e-3,
         train_log_interval: int = 10,
     ) -> Dict[str, Any]:
-        """
-        Backward-compatible alias for MintA evasion + defense evaluation.
-        """
-        return self.minta_evasion(
+        return self.evasion(
             split=split,
             train_split=train_split,
             train_epochs=train_epochs,

@@ -215,7 +215,7 @@ def _run_trial(base_graph, target: str, nclass: int, args, device: str, trial_id
         target_node=target,
     )
 
-    summary = pipeline.minta_evasion(
+    summary = pipeline.evasion(
         split="test",
         train_split="train",
         train_epochs=args.victim_epochs,

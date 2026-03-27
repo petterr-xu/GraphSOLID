@@ -25,6 +25,7 @@ def quiet_tqdm(*args, **kwargs):
 mtk.tqdm = quiet_tqdm
 
 class Attacker():
+    attack_mode = "poison_train"
     def __init__(self, dataset_module:AbstractDataModule):
         self.dataset_module = dataset_module
     def to(self,device):
@@ -34,121 +35,210 @@ class Attacker():
 
 class RandomAttacker(Attacker):
     """
-    Randomly perturb a fixed ratio of edges on the *original HeteroData* (no to_homogeneous()).
+    Random targeted evasion attacker.
 
-    Behavior:
-    - For each edge_type in a HeteroData, delete k edges and add k new edges, where
-      k = floor(perturb_ratio * num_edges_of_that_edge_type).
-      (So every relation is perturbed with the same ratio.)
-    - Only edge structure (edge_index) is changed.
-    - Node/edge attributes are preserved as much as possible:
-        * existing edge_attr (if any) is kept for retained edges
-        * new edges get zero edge_attr with the same feature dimension (if edge_attr exists)
-    - For Data (homogeneous) input, it perturbs the single edge_index similarly.
-
-    Notes:
-    - For (src_type == dst_type), self-loops are avoided by default (allow_self_loops=False).
-    - Duplicated edges are avoided.
+    It samples target nodes from the target-node test split and randomly perturbs
+    edges incident to those nodes on one target-target relation.
     """
+    attack_mode = "evasion"
 
     def __init__(
         self,
         dataset_module,
         perturb_ratio: float = 0.05,
+        ctrl_nodes_size: int = 10,
+        target_label: int = 1,
+        only_attack_correctly_detected: bool = True,
+        target_node_type: Optional[str] = None,
+        edge_type_to_perturb: Optional[Tuple[str, str, str]] = None,
+        victim_model: Optional[nn.Module] = None,
+        victim_engine: Optional[Any] = None,
+        device: Optional[str] = None,
         seed: Optional[int] = None,
         allow_self_loops: bool = False,
-        ensure_undirected: bool = True,
         max_sampling_rounds: int = 50,
         oversample_factor: int = 5,
     ):
         super().__init__(dataset_module)
         assert 0.0 <= perturb_ratio <= 1.0
         self.perturb_ratio = float(perturb_ratio)
+        self.ctrl_nodes_size = int(ctrl_nodes_size)
+        self.positive_label = int(target_label)
+        self.only_attack_correctly_detected = bool(only_attack_correctly_detected)
+        self.target_node_type = target_node_type
+        self.edge_type_to_perturb = edge_type_to_perturb
+        self.victim_model = victim_model
+        self.victim_engine = victim_engine
+        self.device = device
         self.seed = seed
         self.allow_self_loops = allow_self_loops
-        self.ensure_undirected = ensure_undirected
         self.max_sampling_rounds = int(max_sampling_rounds)
         self.oversample_factor = int(oversample_factor)
+        self.last_attack_info: Dict[str, Any] = {}
 
     @staticmethod
     def _hash_edges(src: torch.Tensor, dst: torch.Tensor, num_dst: int) -> torch.Tensor:
         # unique id for each directed edge (src, dst)
         return src.to(torch.long) * int(num_dst) + dst.to(torch.long)
 
-    @staticmethod
-    def _hash_undirected(src: torch.Tensor, dst: torch.Tensor, num_nodes: int) -> torch.Tensor:
-        u = torch.minimum(src, dst).to(torch.long)
-        v = torch.maximum(src, dst).to(torch.long)
-        return u * int(num_nodes) + v
+    def _resolve_target_type(self, data: HeteroData) -> str:
+        if self.target_node_type:
+            return self.target_node_type
+        dm = self.dataset_module
+        for attr in ["target", "target_node_type", "target_node"]:
+            if hasattr(dm, attr):
+                value = getattr(dm, attr)
+                if isinstance(value, str) and value:
+                    return value
+        if hasattr(data, "node_types") and len(data.node_types) == 1:
+            return data.node_types[0]
+        raise ValueError("[RandomAttacker] Cannot infer target node type.")
 
-    @staticmethod
-    def _looks_undirected(edge_index: torch.Tensor, num_nodes: int) -> bool:
-        if edge_index.numel() == 0:
-            return False
-        src, dst = edge_index[0], edge_index[1]
-        h = RandomAttacker._hash_edges(src, dst, num_nodes)
-        hr = RandomAttacker._hash_edges(dst, src, num_nodes)
-        return bool(torch.isin(hr, h).all().item())
+    def _predict_nodes_with_victim(self, data: HeteroData, target: str, node_indices: np.ndarray) -> Optional[np.ndarray]:
+        if node_indices is None or len(node_indices) == 0:
+            return np.array([], dtype=np.int64)
+        node_indices = np.asarray(node_indices, dtype=np.int64)
 
-    def _sample_new_edges(
+        if self.victim_model is not None:
+            try:
+                self.victim_model.eval()
+                with torch.no_grad():
+                    pred_raw = self.victim_model(data.x_dict, data.edge_index_dict)
+                    if isinstance(pred_raw, dict):
+                        pred_raw = pred_raw[target]
+                    pred = pred_raw.argmax(dim=-1)
+                return pred[node_indices].detach().cpu().numpy()
+            except Exception:
+                pass
+
+        if self.victim_engine is not None and hasattr(self.victim_engine, "eval_on_graph"):
+            pred_map: Dict[int, int] = {}
+            for split_name in ("train", "val", "test"):
+                try:
+                    res = self.victim_engine.eval_on_graph(data, split=split_name, target_type=target)
+                except Exception:
+                    continue
+                idx = res.get("node_idx")
+                y_pred = res.get("y_pred")
+                if idx is None or y_pred is None:
+                    continue
+                idx = idx.detach().to(torch.long).view(-1).cpu()
+                y_pred = y_pred.detach().to(torch.long).view(-1).cpu()
+                for n, p in zip(idx.tolist(), y_pred.tolist()):
+                    pred_map[int(n)] = int(p)
+            if pred_map:
+                out = np.full((len(node_indices),), -1, dtype=np.int64)
+                for i, n in enumerate(node_indices.tolist()):
+                    if int(n) in pred_map:
+                        out[i] = pred_map[int(n)]
+                return out
+
+        return None
+
+    def _select_attack_nodes(self, data: HeteroData, target: str) -> Tuple[np.ndarray, Dict[str, Any]]:
+        y = data[target].y
+        test_mask = getattr(data[target], "test_mask", None)
+        if test_mask is None:
+            raise ValueError("[RandomAttacker] target node test_mask is required.")
+
+        test_idx = test_mask.nonzero(as_tuple=False).view(-1).cpu().numpy()
+        y_test = y[test_mask].cpu().numpy()
+        pos_idx = test_idx[y_test == self.positive_label]
+        if len(pos_idx) == 0:
+            raise ValueError("[RandomAttacker] No positive test nodes found for attack.")
+
+        candidates = pos_idx
+        used_detected = False
+        if self.only_attack_correctly_detected:
+            pred_test = self._predict_nodes_with_victim(data, target, test_idx)
+            if pred_test is not None:
+                detected_idx = test_idx[pred_test == self.positive_label]
+                detected_pos = np.intersect1d(pos_idx, detected_idx, assume_unique=False)
+                if len(detected_pos) > 0:
+                    candidates = detected_pos
+                    used_detected = True
+
+        k = min(self.ctrl_nodes_size, len(candidates))
+        selected = np.array(random.sample(list(candidates), k), dtype=np.int64) if k > 0 else np.array([], dtype=np.int64)
+        return selected, {
+            "num_test_nodes": int(len(test_idx)),
+            "num_positive_test_nodes": int(len(pos_idx)),
+            "selected_adv_nodes": int(len(selected)),
+            "used_detected_positive_subset": bool(used_detected),
+            "positive_label": int(self.positive_label),
+        }
+
+    def _resolve_edge_type(self, data: HeteroData, target: str) -> Tuple[str, str, str]:
+        if self.edge_type_to_perturb is not None:
+            if self.edge_type_to_perturb not in data.edge_types:
+                raise ValueError(f"[RandomAttacker] edge_type_to_perturb {self.edge_type_to_perturb} not in graph.")
+            return self.edge_type_to_perturb
+        candidates = [et for et in data.edge_types if et[0] == target and et[2] == target]
+        if not candidates:
+            raise ValueError("[RandomAttacker] No target-target edge type available for random evasion attack.")
+        return candidates[0]
+
+    def _compute_edge_budget(self, edge_index: torch.Tensor, attack_nodes: np.ndarray) -> Tuple[int, int]:
+        if attack_nodes is None or len(attack_nodes) == 0:
+            return 0, 0
+        src = edge_index[0].detach().cpu().numpy()
+        dst = edge_index[1].detach().cpu().numpy()
+        deg_sum = int(np.isin(src, attack_nodes).sum() + np.isin(dst, attack_nodes).sum())
+        edge_budget = max(0, int(np.floor(self.perturb_ratio * deg_sum)))
+        return edge_budget, deg_sum
+
+    def _sample_targeted_new_edges(
         self,
-        num_src: int,
-        num_dst: int,
+        num_nodes: int,
+        attack_nodes: np.ndarray,
         k: int,
         existing_hash: torch.Tensor,
         device: torch.device,
-        forbid_self_loops: bool,
         generator: Optional[torch.Generator],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Sample k new edges not in existing_hash.
-        Returns (new_src, new_dst) each shape [k].
-        """
-        if k <= 0:
-            return (torch.empty(0, dtype=torch.long, device=device),
-                    torch.empty(0, dtype=torch.long, device=device))
+        if k <= 0 or len(attack_nodes) == 0:
+            return (
+                torch.empty(0, dtype=torch.long, device=device),
+                torch.empty(0, dtype=torch.long, device=device),
+            )
 
-        existing = existing_hash
+        attack_nodes_t = torch.as_tensor(attack_nodes, dtype=torch.long, device=device)
         new_src_list = []
         new_dst_list = []
-
+        existing = existing_hash
         remaining = k
+
         for _ in range(self.max_sampling_rounds):
             if remaining <= 0:
                 break
-
             m = max(remaining * self.oversample_factor, remaining + 10)
-            cand_src = torch.randint(0, num_src, (m,), device=device, generator=generator)
-            cand_dst = torch.randint(0, num_dst, (m,), device=device, generator=generator)
-
-            if forbid_self_loops and num_src == num_dst:
+            pick = torch.randint(0, attack_nodes_t.numel(), (m,), device=device, generator=generator)
+            cand_src = attack_nodes_t[pick]
+            cand_dst = torch.randint(0, num_nodes, (m,), device=device, generator=generator)
+            if not self.allow_self_loops:
                 mask = cand_src != cand_dst
-                cand_src, cand_dst = cand_src[mask], cand_dst[mask]
+                cand_src = cand_src[mask]
+                cand_dst = cand_dst[mask]
                 if cand_src.numel() == 0:
                     continue
 
-            cand_hash = self._hash_edges(cand_src, cand_dst, num_dst)
-
-            # Filter out existing edges
+            cand_hash = self._hash_edges(cand_src, cand_dst, num_nodes)
             keep = ~torch.isin(cand_hash, existing)
-            cand_src, cand_dst, cand_hash = cand_src[keep], cand_dst[keep], cand_hash[keep]
+            cand_src = cand_src[keep]
+            cand_dst = cand_dst[keep]
+            cand_hash = cand_hash[keep]
             if cand_src.numel() == 0:
                 continue
 
-            # Deduplicate candidates themselves (compatible with older torch: no return_index)
-            # 1) sort by hash
             order = torch.argsort(cand_hash)
             cand_hash = cand_hash[order]
-            cand_src  = cand_src[order]
-            cand_dst  = cand_dst[order]
-
-            # 2) keep first occurrence for each unique hash
-            keep2 = torch.ones(cand_hash.size(0), dtype=torch.bool, device=cand_hash.device)
+            cand_src = cand_src[order]
+            cand_dst = cand_dst[order]
+            keep2 = torch.ones(cand_hash.size(0), dtype=torch.bool, device=device)
             keep2[1:] = cand_hash[1:] != cand_hash[:-1]
-
             cand_hash = cand_hash[keep2]
-            cand_src  = cand_src[keep2]
-            cand_dst  = cand_dst[keep2]
+            cand_src = cand_src[keep2]
+            cand_dst = cand_dst[keep2]
 
             take = min(remaining, cand_src.numel())
             if take <= 0:
@@ -156,253 +246,16 @@ class RandomAttacker(Attacker):
 
             new_src_list.append(cand_src[:take])
             new_dst_list.append(cand_dst[:take])
-
-            # Update existing set with newly taken edges to prevent duplicates across rounds
-            taken_hash = self._hash_edges(cand_src[:take], cand_dst[:take], num_dst)
-            existing = torch.cat([existing, taken_hash], dim=0)
-
+            existing = torch.cat([existing, cand_hash[:take]], dim=0)
             remaining -= take
 
-        if len(new_src_list) == 0:
-            return (torch.empty(0, dtype=torch.long, device=device),
-                    torch.empty(0, dtype=torch.long, device=device))
-
-        new_src = torch.cat(new_src_list, dim=0)
-        new_dst = torch.cat(new_dst_list, dim=0)
-
-        if new_src.numel() > k:
-            new_src = new_src[:k]
-            new_dst = new_dst[:k]
-
-        return new_src, new_dst
-
-    def _sample_new_undirected_pairs(
-        self,
-        num_nodes: int,
-        k: int,
-        existing_hash: torch.Tensor,
-        device: torch.device,
-        forbid_self_loops: bool,
-        generator: Optional[torch.Generator],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Sample k undirected pairs (u, v) with u <= v, not in existing_hash.
-        Returns (u, v) each shape [k].
-        """
-        if k <= 0:
+        if not new_src_list:
             return (
                 torch.empty(0, dtype=torch.long, device=device),
                 torch.empty(0, dtype=torch.long, device=device),
             )
+        return torch.cat(new_src_list, dim=0), torch.cat(new_dst_list, dim=0)
 
-        existing = existing_hash
-        new_u_list = []
-        new_v_list = []
-
-        remaining = k
-        for _ in range(self.max_sampling_rounds):
-            if remaining <= 0:
-                break
-
-            m = max(remaining * self.oversample_factor, remaining + 10)
-            cand_u = torch.randint(0, num_nodes, (m,), device=device, generator=generator)
-            cand_v = torch.randint(0, num_nodes, (m,), device=device, generator=generator)
-
-            if forbid_self_loops:
-                mask = cand_u != cand_v
-                cand_u, cand_v = cand_u[mask], cand_v[mask]
-                if cand_u.numel() == 0:
-                    continue
-
-            u = torch.minimum(cand_u, cand_v)
-            v = torch.maximum(cand_u, cand_v)
-            cand_hash = self._hash_undirected(u, v, num_nodes)
-
-            keep = ~torch.isin(cand_hash, existing)
-            u, v, cand_hash = u[keep], v[keep], cand_hash[keep]
-            if u.numel() == 0:
-                continue
-
-            # Deduplicate candidates themselves (compatible with older torch: no return_index)
-            order = torch.argsort(cand_hash)
-            cand_hash = cand_hash[order]
-            u = u[order]
-            v = v[order]
-
-            keep2 = torch.ones(cand_hash.size(0), dtype=torch.bool, device=cand_hash.device)
-            keep2[1:] = cand_hash[1:] != cand_hash[:-1]
-
-            cand_hash = cand_hash[keep2]
-            u = u[keep2]
-            v = v[keep2]
-
-            take = min(remaining, u.numel())
-            if take <= 0:
-                continue
-
-            new_u_list.append(u[:take])
-            new_v_list.append(v[:take])
-
-            taken_hash = self._hash_undirected(u[:take], v[:take], num_nodes)
-            existing = torch.cat([existing, taken_hash], dim=0)
-            remaining -= take
-
-        if len(new_u_list) == 0:
-            return (
-                torch.empty(0, dtype=torch.long, device=device),
-                torch.empty(0, dtype=torch.long, device=device),
-            )
-
-        new_u = torch.cat(new_u_list, dim=0)
-        new_v = torch.cat(new_v_list, dim=0)
-
-        if new_u.numel() > k:
-            new_u = new_u[:k]
-            new_v = new_v[:k]
-
-        return new_u, new_v
-
-    def _perturb_edge_index(
-        self,
-        edge_index: torch.Tensor,
-        num_src: int,
-        num_dst: int,
-        edge_attr: Optional[torch.Tensor],
-        generator: Optional[torch.Generator],
-        forbid_self_loops: bool,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Delete k edges and add k new edges. Return (new_edge_index, new_edge_attr).
-        """
-        device = edge_index.device
-        E = edge_index.size(1)
-        k = int(self.perturb_ratio * E)
-
-        if E == 0 or k == 0:
-            return edge_index, edge_attr
-
-        # For undirected graphs stored as symmetric edge_index (src_type == dst_type),
-        # perturb in pairs so we don't break symmetry.
-        if (
-            self.ensure_undirected
-            and num_src == num_dst
-            and self._looks_undirected(edge_index, num_src)
-        ):
-            num_nodes = num_src
-            src, dst = edge_index[0], edge_index[1]
-            undir_hash = self._hash_undirected(src, dst, num_nodes)
-            # Deduplicate undirected pairs (compatible with older torch: no return_index)
-            order = torch.argsort(undir_hash)
-            undir_hash = undir_hash[order]
-            uniq_idx = torch.ones(undir_hash.size(0), dtype=torch.bool, device=undir_hash.device)
-            uniq_idx[1:] = undir_hash[1:] != undir_hash[:-1]
-            uniq_hash = undir_hash[uniq_idx]
-            num_undir = int(uniq_hash.numel())
-            k_undir = int(self.perturb_ratio * num_undir)
-            if num_undir == 0 or k_undir == 0:
-                return edge_index, edge_attr
-
-            perm = torch.randperm(num_undir, device=device, generator=generator)
-            del_undir_hash = uniq_hash[perm[:k_undir]]
-
-            # remove both directions for deleted undirected pairs
-            undir_all = self._hash_undirected(src, dst, num_nodes)
-            keep_mask = ~torch.isin(undir_all, del_undir_hash)
-
-            kept_edge_index = edge_index[:, keep_mask]
-            kept_edge_attr = None
-            if edge_attr is not None:
-                kept_edge_attr = edge_attr[keep_mask]
-
-            # sample new undirected pairs
-            existing_hash = self._hash_undirected(
-                kept_edge_index[0], kept_edge_index[1], num_nodes
-            )
-            new_u, new_v = self._sample_new_undirected_pairs(
-                num_nodes=num_nodes,
-                k=k_undir,
-                existing_hash=existing_hash,
-                device=device,
-                forbid_self_loops=forbid_self_loops,
-                generator=generator,
-            )
-
-            if new_u.numel() == 0:
-                return kept_edge_index, kept_edge_attr
-
-            # expand to directed edges
-            if forbid_self_loops:
-                self_mask = new_u != new_v
-                new_u, new_v = new_u[self_mask], new_v[self_mask]
-
-            rev_u = new_v
-            rev_v = new_u
-            added_edge_index = torch.stack(
-                [torch.cat([new_u, rev_u]), torch.cat([new_v, rev_v])], dim=0
-            )
-            new_edge_index = torch.cat([kept_edge_index, added_edge_index], dim=1)
-
-            new_edge_attr = kept_edge_attr
-            if edge_attr is not None:
-                if edge_attr.dim() >= 2:
-                    feat_dim = edge_attr.size(-1)
-                    added_attr = torch.zeros(
-                        (added_edge_index.size(1), feat_dim),
-                        device=device,
-                        dtype=edge_attr.dtype,
-                    )
-                else:
-                    added_attr = torch.zeros(
-                        (added_edge_index.size(1),),
-                        device=device,
-                        dtype=edge_attr.dtype,
-                    )
-                new_edge_attr = torch.cat([kept_edge_attr, added_attr], dim=0)
-
-            return new_edge_index, new_edge_attr
-
-        # 1) random delete k edges
-        perm = torch.randperm(E, device=device, generator=generator)
-        del_idx = perm[:k]
-        keep_mask = torch.ones(E, dtype=torch.bool, device=device)
-        keep_mask[del_idx] = False
-
-        kept_edge_index = edge_index[:, keep_mask]
-
-        kept_edge_attr = None
-        if edge_attr is not None:
-            kept_edge_attr = edge_attr[keep_mask]
-
-        # 2) random add k new edges
-        src, dst = kept_edge_index[0], kept_edge_index[1]
-        existing_hash = self._hash_edges(src, dst, num_dst)
-        new_src, new_dst = self._sample_new_edges(
-            num_src=num_src,
-            num_dst=num_dst,
-            k=k,
-            existing_hash=existing_hash,
-            device=device,
-            forbid_self_loops=forbid_self_loops,
-            generator=generator,
-        )
-
-        if new_src.numel() == 0:
-            return kept_edge_index, kept_edge_attr
-
-        added_edge_index = torch.stack([new_src, new_dst], dim=0)
-        new_edge_index = torch.cat([kept_edge_index, added_edge_index], dim=1)
-
-        # edge_attr: preserve kept; added edges -> zeros
-        new_edge_attr = kept_edge_attr
-        if edge_attr is not None:
-            if edge_attr.dim() >= 2:
-                feat_dim = edge_attr.size(-1)
-                added_attr = torch.zeros((added_edge_index.size(1), feat_dim), device=device, dtype=edge_attr.dtype)
-            else:
-                added_attr = torch.zeros((added_edge_index.size(1),), device=device, dtype=edge_attr.dtype)
-            new_edge_attr = torch.cat([kept_edge_attr, added_attr], dim=0)
-
-        return new_edge_index, new_edge_attr
 
     def attack(self, data):
         # Setup RNG
@@ -411,55 +264,117 @@ class RandomAttacker(Attacker):
             generator = torch.Generator()
             generator.manual_seed(self.seed)
 
-        # Homogeneous graph case
         if isinstance(data, Data):
-            warnings.warn("RandomAttacker works best with HeteroData. Proceeding with Data (homogeneous graph).")
-            out = data.clone()
-            num_nodes = out.num_nodes
-            forbid_self_loops = (not self.allow_self_loops)
-            new_ei, new_ea = self._perturb_edge_index(
-                edge_index=out.edge_index,
-                num_src=num_nodes,
-                num_dst=num_nodes,
-                edge_attr=getattr(out, "edge_attr", None),
-                generator=generator,
-                forbid_self_loops=forbid_self_loops,
-            )
-            out.edge_index = new_ei
-            if getattr(out, "edge_attr", None) is not None:
-                out.edge_attr = new_ea
-            return out
+            raise RuntimeError("RandomAttacker expects HeteroData for evasion attacks.")
 
-        # Heterogeneous graph case (recommended)
         if not isinstance(data, HeteroData):
             raise RuntimeError("Expected `data` to be `Data` or `HeteroData`.")
 
         out = data.clone()
+        target = self._resolve_target_type(out)
+        edge_type = self._resolve_edge_type(out, target)
+        attack_nodes, select_info = self._select_attack_nodes(out, target)
 
-        for edge_type in out.edge_types:
-            store = out[edge_type]
-            if not hasattr(store, "edge_index") or store.edge_index is None:
-                continue
+        attack_nodes_tensor = torch.as_tensor(attack_nodes, dtype=torch.long).view(-1).cpu()
+        out.attack_target_nodes = attack_nodes_tensor
+        out.attack_target_type = target
 
-            src_type, _, dst_type = edge_type
-            num_src = out[src_type].num_nodes
-            num_dst = out[dst_type].num_nodes
+        if attack_nodes_tensor.numel() == 0:
+            self.last_attack_info = {
+                "attack_name": "random",
+                "target_type": target,
+                "num_adv_nodes": 0,
+                **select_info,
+                "edge_type_to_perturb": edge_type,
+                "edge_budget": 0,
+                "num_added_edges": 0,
+                "num_removed_edges": 0,
+            }
+            return out
 
-            forbid_self_loops = (src_type == dst_type) and (not self.allow_self_loops)
+        store = out[edge_type]
+        edge_index = store.edge_index
+        num_nodes = int(out[target].num_nodes)
+        edge_budget, degree_sum = self._compute_edge_budget(edge_index, attack_nodes)
+        if edge_budget <= 0 or edge_index.numel() == 0:
+            self.last_attack_info = {
+                "attack_name": "random",
+                "target_type": target,
+                "num_adv_nodes": int(attack_nodes_tensor.numel()),
+                **select_info,
+                "edge_type_to_perturb": edge_type,
+                "control_nodes_degree_sum": int(degree_sum),
+                "edge_budget": int(edge_budget),
+                "num_added_edges": 0,
+                "num_removed_edges": 0,
+            }
+            return out
 
-            edge_attr = getattr(store, "edge_attr", None)
-            new_ei, new_ea = self._perturb_edge_index(
-                edge_index=store.edge_index,
-                num_src=num_src,
-                num_dst=num_dst,
-                edge_attr=edge_attr,
-                generator=generator,
-                forbid_self_loops=forbid_self_loops,
-            )
+        src = edge_index[0]
+        dst = edge_index[1]
+        incident_mask = torch.isin(src, attack_nodes_tensor.to(src.device)) | torch.isin(dst, attack_nodes_tensor.to(dst.device))
+        incident_idx = incident_mask.nonzero(as_tuple=False).view(-1)
+        del_k = min(int(edge_budget), int(incident_idx.numel()))
+        if del_k == 0:
+            self.last_attack_info = {
+                "attack_name": "random",
+                "target_type": target,
+                "num_adv_nodes": int(attack_nodes_tensor.numel()),
+                **select_info,
+                "edge_type_to_perturb": edge_type,
+                "control_nodes_degree_sum": int(degree_sum),
+                "edge_budget": int(edge_budget),
+                "num_added_edges": 0,
+                "num_removed_edges": 0,
+            }
+            return out
 
-            store.edge_index = new_ei
-            if edge_attr is not None:
-                store.edge_attr = new_ea
+        perm = torch.randperm(incident_idx.numel(), device=edge_index.device, generator=generator)
+        del_idx = incident_idx[perm[:del_k]]
+        keep_mask = torch.ones(edge_index.size(1), dtype=torch.bool, device=edge_index.device)
+        keep_mask[del_idx] = False
+        kept_edge_index = edge_index[:, keep_mask]
+        kept_edge_attr = getattr(store, "edge_attr", None)
+        if kept_edge_attr is not None:
+            kept_edge_attr = kept_edge_attr[keep_mask]
+
+        existing_hash = self._hash_edges(kept_edge_index[0], kept_edge_index[1], num_nodes)
+        new_src, new_dst = self._sample_targeted_new_edges(
+            num_nodes=num_nodes,
+            attack_nodes=attack_nodes,
+            k=del_k,
+            existing_hash=existing_hash,
+            device=edge_index.device,
+            generator=generator,
+        )
+        if new_src.numel() > 0:
+            added_edge_index = torch.stack([new_src, new_dst], dim=0)
+            store.edge_index = torch.cat([kept_edge_index, added_edge_index], dim=1)
+            if kept_edge_attr is not None:
+                if kept_edge_attr.dim() >= 2:
+                    feat_dim = kept_edge_attr.size(-1)
+                    added_attr = torch.zeros((added_edge_index.size(1), feat_dim), device=edge_index.device, dtype=kept_edge_attr.dtype)
+                else:
+                    added_attr = torch.zeros((added_edge_index.size(1),), device=edge_index.device, dtype=kept_edge_attr.dtype)
+                store.edge_attr = torch.cat([kept_edge_attr, added_attr], dim=0)
+        else:
+            store.edge_index = kept_edge_index
+            if kept_edge_attr is not None:
+                store.edge_attr = kept_edge_attr
+
+        num_added_edges = int(new_src.numel())
+        num_removed_edges = int(del_k)
+        self.last_attack_info = {
+            "attack_name": "random",
+            "target_type": target,
+            "num_adv_nodes": int(attack_nodes_tensor.numel()),
+            **select_info,
+            "edge_type_to_perturb": edge_type,
+            "control_nodes_degree_sum": int(degree_sum),
+            "edge_budget": int(edge_budget),
+            "num_added_edges": num_added_edges,
+            "num_removed_edges": num_removed_edges,
+        }
 
         return out
 
@@ -733,6 +648,7 @@ class Metattacker(Attacker):
 
 class MintaAttacker(Attacker):
     """
+    attack_mode = "evasion"
     MintA: Multi-Instance adversarial attack (from MintA demo notebooks).
 
     Tailored to DNS-style hetero graphs, but will auto-infer the target node type
@@ -1126,8 +1042,6 @@ class MintaAttacker(Attacker):
             empty_nodes = torch.empty((0,), dtype=torch.long)
             out.attack_target_nodes = empty_nodes
             out.attack_target_type = target
-            out.minta_adv_nodes = empty_nodes
-            out.minta_target_type = target
             self.last_attack_info = {
                 "attack_name": "minta",
                 "target_type": target,
@@ -1253,8 +1167,6 @@ class MintaAttacker(Attacker):
         adv_nodes_tensor = torch.as_tensor(adv_nodes_test, dtype=torch.long).view(-1).cpu()
         out.attack_target_nodes = adv_nodes_tensor
         out.attack_target_type = target
-        out.minta_adv_nodes = adv_nodes_tensor
-        out.minta_target_type = target
         self.last_attack_info = {
             "attack_name": "minta",
             "target_type": target,

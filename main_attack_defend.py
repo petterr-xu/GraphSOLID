@@ -223,7 +223,15 @@ def main(cfg: DictConfig):
         if cfg.general.attack_method == 'metattack':
             attacker = Metattacker(datamodule,perturb_ratio=cfg.general.general_edge_perturb_ratio,re_trainings=5,device=gpuid,train_iters = 200)
         elif cfg.general.attack_method == 'random':
-            attacker = RandomAttacker(datamodule, perturb_ratio=cfg.general.general_edge_perturb_ratio)
+            attacker = RandomAttacker(
+                datamodule,
+                perturb_ratio=cfg.general.sub_edge_perturb_ratio,
+                ctrl_nodes_size=cfg.general.ctrl_nodes_size,
+                target_label=int(getattr(cfg.general, "minta_positive_label", 1)),
+                only_attack_correctly_detected=bool(getattr(cfg.general, "minta_only_attack_correctly_detected", True)),
+                target_node_type=cfg.dataset.target,
+                device=device,
+            )
         elif cfg.general.attack_method == 'minta':
             minta_positive_label = int(getattr(cfg.general, "minta_positive_label", 1))
             attacker = MintaAttacker(
