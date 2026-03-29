@@ -19,7 +19,7 @@ from src.models import HeteroNN, classifier_engine
 from src.attack.attacker import Metattacker, RandomAttacker, MintaAttacker, RoHeAttacker
 from src.attack.pipeline import DefaultPipeline
 from src.attack.surrogate_pipeline import SurrogateAttackPipeline
-from src.attack.defender import DiffusionPurifyDefender
+from src.attack.defender import DiffusionPurifyDefender, JaccardDefender
 from src.utils import VNG_utils, graphbuilder
 from src.utils.hetero_dataset_util import GraphDataLoader
 from src.DiGress.src import utils as digress_utils
@@ -271,6 +271,12 @@ def main(cfg: DictConfig):
                 diffusion_model=model,
                 metapaths=cfg.dataset.metapaths,
                 target_node_type=cfg.dataset.target,
+            )
+        elif defense_method == "jaccard":
+            defender = JaccardDefender(
+                threshold=float(getattr(cfg.general, "jaccard_threshold", 0.01)),
+                binarize=bool(getattr(cfg.general, "jaccard_binarize", True)),
+                remove_self_loops=bool(getattr(cfg.general, "jaccard_remove_self_loops", True)),
             )
         else:
             raise NotImplementedError(f"Unknown defense method {cfg.general.defense_method}")
