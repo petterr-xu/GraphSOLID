@@ -39,6 +39,7 @@ sub_edge_perturb_ratio: 0.1
 general_edge_perturb_ratio: 0.15
 
 # defender settings
+defense_method: 'diffusion'   # 'none' | 'diffusion'
 purify_steps: 10
 
 # repeated experiment settings (for main_attack_defend.py)

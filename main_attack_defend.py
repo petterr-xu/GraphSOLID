@@ -249,12 +249,18 @@ def main(cfg: DictConfig):
         else:
             raise NotImplementedError("Unknown attack method {}".format(cfg.general.attack_method))
 
-        diffusionDefender = DiffusionPurifyDefender(
-            diffusion_steps=cfg.general.purify_steps,
-            diffusion_model=model,
-            metapaths=cfg.dataset.metapaths,
-            target_node_type=cfg.dataset.target,
-        )
+        defense_method = str(getattr(cfg.general, "defense_method", "diffusion")).lower()
+        if defense_method in {"none", "null", "false", "off"}:
+            defender = None
+        elif defense_method == "diffusion":
+            defender = DiffusionPurifyDefender(
+                diffusion_steps=cfg.general.purify_steps,
+                diffusion_model=model,
+                metapaths=cfg.dataset.metapaths,
+                target_node_type=cfg.dataset.target,
+            )
+        else:
+            raise NotImplementedError(f"Unknown defense method {cfg.general.defense_method}")
 
         classifier = HeteroNN.HeteroGNN_classifier(
             net=cfg.general.net,
@@ -303,10 +309,10 @@ def main(cfg: DictConfig):
             dataset_module=datamodule,
             attacker=attacker,
             classifier_engine=classifier_eg,
-            defender=diffusionDefender,
+            defender=defender,
             device=device,
         )
-        result = minta_pipeline.evasion_then_defend(
+        evasion_kwargs = dict(
             split='test',
             train_split=getattr(cfg.general, "minta_train_split", "train"),
             train_epochs=int(getattr(cfg.general, "minta_victim_epochs", 200)),
@@ -317,6 +323,10 @@ def main(cfg: DictConfig):
             early_stop_min_delta=float(getattr(cfg.general, "minta_victim_min_delta", 1e-3)),
             train_log_interval=int(getattr(cfg.general, "minta_train_log_interval", 10)),
         )
+        if defender is None:
+            result = minta_pipeline.evasion(include_defended=False, **evasion_kwargs)
+        else:
+            result = minta_pipeline.evasion_then_defend(**evasion_kwargs)
         last_result = result
 
         metrics = result.get("metrics", {})

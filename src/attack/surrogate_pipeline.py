@@ -1196,7 +1196,7 @@ class SurrogateAttackPipeline:
         shuffle: bool = False,
         log_every: int = 1,
         eval_split: str = "test",
-        include_defended: Optional[bool] = True,
+        include_defended: Optional[bool] = None,
         positive_label: int = 1,
         early_stop_patience: int = 10,
         early_stop_min_delta: float = 1e-3,
