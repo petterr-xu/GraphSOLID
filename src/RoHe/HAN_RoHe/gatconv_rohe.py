@@ -69,6 +69,7 @@ class GATConv(nn.Module):
 
     def forward(self, graph, feat):
         graph = graph.local_var()
+        device = feat[0].device if isinstance(feat, tuple) else feat.device
         if isinstance(feat, tuple):
             h_src = self.feat_drop(feat[0])
             h_dst = self.feat_drop(feat[1])
@@ -83,22 +84,31 @@ class GATConv(nn.Module):
         graph.srcdata.update({'ft': feat_src})
         
         # introduce transiting prior
-        e_trans = torch.FloatTensor(self.settings['TransM'].data).view(N_e,1)
-        e_trans = e_trans.repeat(1,8).resize_(N_e,8,1) 
+        e_trans = torch.as_tensor(
+            self.settings['TransM'].data,
+            dtype=feat_src.dtype,
+            device=device,
+        ).view(N_e, 1)
+        e_trans = e_trans.repeat(1, self._num_heads).view(N_e, self._num_heads, 1)
         
         # feature-based similarity 
         e = torch.cat([torch.matmul(feat_src[:,i,:].view(N,self._out_feats),\
                 feat_src[:,i,:].t().view(self._out_feats,N))[graph.edges()[0], graph.edges()[1]].view(N_e,1)\
-                    for i in range(self._num_heads)],dim=1).view(N_e,8,1) 
+                    for i in range(self._num_heads)],dim=1).view(N_e, self._num_heads, 1) 
                     
         total_edge = torch.cat((graph.edges()[0].view(1,N_e),graph.edges()[1].view(1,N_e)),0)
         # confidence score in Eq(7)
-        attn = torch.sparse.FloatTensor(total_edge,\
-                                        torch.squeeze((e.to('cpu')  * e_trans).sum(-2)), torch.Size([N,N])).to(self.settings['device'])
+        attn_values = torch.squeeze((e * e_trans).sum(-2), dim=-1)
+        attn = torch.sparse_coo_tensor(
+            total_edge,
+            attn_values,
+            torch.Size([N, N]),
+            device=device,
+        )
                                         
         # purification mask in Eq(8)
         attn = self.mask(attn.to_dense()).t()
-        e[attn[graph.edges()[0],graph.edges()[1]].view(N_e,1).repeat(1,8).view(N_e,8,1)<-100] = -9e15 
+        e[attn[graph.edges()[0],graph.edges()[1]].view(N_e, 1).repeat(1, self._num_heads).view(N_e, self._num_heads, 1)<-100] = -9e15 
         
         # obtain purified final attention in Eq(9)
         graph.edata['a'] = edge_softmax(graph, e)
