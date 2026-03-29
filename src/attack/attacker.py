@@ -489,7 +489,14 @@ class RoHeAttacker(Attacker):
         y_test = y[test_mask].cpu().numpy()
         pos_idx = test_idx[y_test == self.positive_label]
         if len(pos_idx) == 0:
-            raise ValueError("[RoHeAttacker] No positive test nodes found for attack.")
+            return np.array([], dtype=np.int64), {
+                "num_test_nodes": int(len(test_idx)),
+                "num_positive_test_nodes": 0,
+                "selected_adv_nodes": 0,
+                "used_detected_positive_subset": False,
+                "positive_label": int(self.positive_label),
+                "skip_attack_due_to_no_positive_test_nodes": True,
+            }
 
         candidates = pos_idx
         used_detected = False
@@ -509,6 +516,7 @@ class RoHeAttacker(Attacker):
             "selected_adv_nodes": int(len(selected)),
             "used_detected_positive_subset": bool(used_detected),
             "positive_label": int(self.positive_label),
+            "skip_attack_due_to_no_positive_test_nodes": False,
         }
 
     def _resolve_edge_type(self, data: HeteroData, target: str) -> Tuple[str, str, str]:
@@ -612,6 +620,7 @@ class RoHeAttacker(Attacker):
                 "edge_budget": 0,
                 "num_added_edges": 0,
                 "hub_node_type": edge_type[2] if edge_type[0] == target else edge_type[0],
+                "skipped": True,
             }
             return out
 
@@ -665,6 +674,7 @@ class RoHeAttacker(Attacker):
             "num_edges_before": int(edge_index.size(1)),
             "num_edges_after": int(store.edge_index.size(1)),
             "num_added_edges": int(added_edge_index.size(1)),
+            "skipped": False,
         }
         return out
 
