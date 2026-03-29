@@ -378,6 +378,296 @@ class RandomAttacker(Attacker):
 
         return out
 
+
+class RoHeAttacker(Attacker):
+    """
+    RoHe-style evasion attacker.
+
+    Core idea: connect attacked target nodes to high-degree hub nodes on one
+    selected relation, which is the vulnerability highlighted by the RoHe paper.
+    """
+
+    attack_mode = "evasion"
+
+    def __init__(
+        self,
+        dataset_module,
+        perturb_ratio: float = 0.1,
+        ctrl_nodes_size: int = 10,
+        target_label: int = 1,
+        only_attack_correctly_detected: bool = True,
+        target_node_type: Optional[str] = None,
+        edge_type_to_perturb: Optional[Tuple[str, str, str]] = None,
+        victim_model: Optional[nn.Module] = None,
+        victim_engine: Optional[Any] = None,
+        device: Optional[str] = None,
+        seed: Optional[int] = None,
+    ):
+        super().__init__(dataset_module)
+        assert 0.0 <= perturb_ratio <= 1.0
+        self.perturb_ratio = float(perturb_ratio)
+        self.ctrl_nodes_size = int(ctrl_nodes_size)
+        self.positive_label = int(target_label)
+        self.only_attack_correctly_detected = bool(only_attack_correctly_detected)
+        self.target_node_type = target_node_type
+        self.edge_type_to_perturb = edge_type_to_perturb
+        self.victim_model = victim_model
+        self.victim_engine = victim_engine
+        self.device = device
+        self.seed = seed
+        self.last_attack_info: Dict[str, Any] = {}
+
+    def _resolve_target_type(self, data: HeteroData) -> str:
+        if self.target_node_type:
+            return self.target_node_type
+        dm = self.dataset_module
+        for attr in ["target", "target_node_type", "target_node"]:
+            if hasattr(dm, attr):
+                value = getattr(dm, attr)
+                if isinstance(value, str) and value:
+                    return value
+        if hasattr(data, "node_types") and len(data.node_types) == 1:
+            return data.node_types[0]
+        raise ValueError("[RoHeAttacker] Cannot infer target node type.")
+
+    def _predict_nodes_with_victim(
+        self,
+        data: HeteroData,
+        target: str,
+        node_indices: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        if node_indices is None or len(node_indices) == 0:
+            return np.array([], dtype=np.int64)
+        node_indices = np.asarray(node_indices, dtype=np.int64)
+
+        if self.victim_model is not None:
+            try:
+                self.victim_model.eval()
+                with torch.no_grad():
+                    try:
+                        pred_raw = self.victim_model(data.x_dict, data.edge_index_dict)
+                    except Exception:
+                        pred_raw = self.victim_model(data)
+                    if isinstance(pred_raw, dict):
+                        pred_raw = pred_raw[target]
+                    pred = pred_raw.argmax(dim=-1)
+                return pred[node_indices].detach().cpu().numpy()
+            except Exception:
+                pass
+
+        if self.victim_engine is not None and hasattr(self.victim_engine, "eval_on_graph"):
+            pred_map: Dict[int, int] = {}
+            for split_name in ("train", "val", "test"):
+                try:
+                    res = self.victim_engine.eval_on_graph(data, split=split_name, target_type=target)
+                except Exception:
+                    continue
+                idx = res.get("node_idx")
+                y_pred = res.get("y_pred")
+                if idx is None or y_pred is None:
+                    continue
+                idx = idx.detach().to(torch.long).view(-1).cpu()
+                y_pred = y_pred.detach().to(torch.long).view(-1).cpu()
+                for n, p in zip(idx.tolist(), y_pred.tolist()):
+                    pred_map[int(n)] = int(p)
+            if pred_map:
+                out = np.full((len(node_indices),), -1, dtype=np.int64)
+                for i, n in enumerate(node_indices.tolist()):
+                    if int(n) in pred_map:
+                        out[i] = pred_map[int(n)]
+                return out
+
+        return None
+
+    def _select_attack_nodes(self, data: HeteroData, target: str) -> Tuple[np.ndarray, Dict[str, Any]]:
+        y = data[target].y
+        test_mask = getattr(data[target], "test_mask", None)
+        if test_mask is None:
+            raise ValueError("[RoHeAttacker] target node test_mask is required.")
+
+        test_idx = test_mask.nonzero(as_tuple=False).view(-1).cpu().numpy()
+        y_test = y[test_mask].cpu().numpy()
+        pos_idx = test_idx[y_test == self.positive_label]
+        if len(pos_idx) == 0:
+            raise ValueError("[RoHeAttacker] No positive test nodes found for attack.")
+
+        candidates = pos_idx
+        used_detected = False
+        if self.only_attack_correctly_detected:
+            pred_pos = self._predict_nodes_with_victim(data, target, pos_idx)
+            if pred_pos is not None:
+                detected_pos = pos_idx[pred_pos == self.positive_label]
+                if len(detected_pos) > 0:
+                    candidates = detected_pos
+                    used_detected = True
+
+        k = min(self.ctrl_nodes_size, len(candidates))
+        selected = np.array(random.sample(list(candidates), k), dtype=np.int64) if k > 0 else np.array([], dtype=np.int64)
+        return selected, {
+            "num_test_nodes": int(len(test_idx)),
+            "num_positive_test_nodes": int(len(pos_idx)),
+            "selected_adv_nodes": int(len(selected)),
+            "used_detected_positive_subset": bool(used_detected),
+            "positive_label": int(self.positive_label),
+        }
+
+    def _resolve_edge_type(self, data: HeteroData, target: str) -> Tuple[str, str, str]:
+        if self.edge_type_to_perturb is not None:
+            if self.edge_type_to_perturb not in data.edge_types:
+                raise ValueError(f"[RoHeAttacker] edge_type_to_perturb {self.edge_type_to_perturb} not in graph.")
+            return self.edge_type_to_perturb
+
+        preferred = [et for et in data.edge_types if et[0] == target and et[2] != target]
+        if preferred:
+            return preferred[0]
+        fallback = [et for et in data.edge_types if et[0] == target or et[2] == target]
+        if fallback:
+            return fallback[0]
+        raise ValueError("[RoHeAttacker] No edge type incident to target node type is available.")
+
+    def _compute_edge_budget(self, edge_index: torch.Tensor, attack_nodes: np.ndarray, attack_on_src: bool) -> Tuple[int, int]:
+        if attack_nodes is None or len(attack_nodes) == 0:
+            return 0, 0
+        target_side = edge_index[0] if attack_on_src else edge_index[1]
+        deg_sum = int(np.isin(target_side.detach().cpu().numpy(), attack_nodes).sum())
+        base = max(deg_sum, len(attack_nodes))
+        edge_budget = int(np.floor(self.perturb_ratio * base))
+        if edge_budget <= 0 and self.perturb_ratio > 0:
+            edge_budget = 1
+        return edge_budget, deg_sum
+
+    def _rank_hubs(self, data: HeteroData, edge_type: Tuple[str, str, str], attack_on_src: bool) -> np.ndarray:
+        edge_index = data[edge_type].edge_index
+        hub_side = edge_index[1] if attack_on_src else edge_index[0]
+        num_hubs = int(data[edge_type[2] if attack_on_src else edge_type[0]].num_nodes)
+        if hub_side.numel() == 0:
+            return np.arange(num_hubs, dtype=np.int64)
+        deg = torch.bincount(hub_side.detach().to(torch.long).cpu(), minlength=num_hubs)
+        return torch.argsort(deg, descending=True).cpu().numpy().astype(np.int64)
+
+    def _build_new_edges(
+        self,
+        edge_index: torch.Tensor,
+        attack_nodes: np.ndarray,
+        ranked_hubs: np.ndarray,
+        attack_on_src: bool,
+        edge_budget: int,
+        same_type: bool,
+    ) -> torch.Tensor:
+        if edge_budget <= 0 or len(attack_nodes) == 0 or len(ranked_hubs) == 0:
+            return torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
+
+        existing = set(zip(edge_index[0].detach().cpu().tolist(), edge_index[1].detach().cpu().tolist()))
+        new_edges = []
+        budget_left = int(edge_budget)
+        hub_list = ranked_hubs.tolist()
+
+        for attack_node in attack_nodes.tolist():
+            if budget_left <= 0:
+                break
+            for hub in hub_list:
+                if same_type and int(hub) == int(attack_node):
+                    continue
+                if attack_on_src:
+                    pair = (int(attack_node), int(hub))
+                else:
+                    pair = (int(hub), int(attack_node))
+                if pair in existing:
+                    continue
+                existing.add(pair)
+                new_edges.append(pair)
+                budget_left -= 1
+                if budget_left <= 0:
+                    break
+
+        if not new_edges:
+            return torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
+        return torch.tensor(new_edges, dtype=torch.long, device=edge_index.device).t().contiguous()
+
+    def attack(self, data):
+        if not isinstance(data, HeteroData):
+            raise RuntimeError("RoHeAttacker expects HeteroData input.")
+
+        if self.seed is not None:
+            random.seed(self.seed)
+            np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
+
+        out = data.clone()
+        target = self._resolve_target_type(out)
+        edge_type = self._resolve_edge_type(out, target)
+        attack_nodes, select_info = self._select_attack_nodes(out, target)
+
+        attack_nodes_tensor = torch.as_tensor(attack_nodes, dtype=torch.long).view(-1).cpu()
+        out.attack_target_nodes = attack_nodes_tensor
+        out.attack_target_type = target
+
+        if attack_nodes_tensor.numel() == 0:
+            self.last_attack_info = {
+                "attack_name": "rohe",
+                "target_type": target,
+                "num_adv_nodes": 0,
+                **select_info,
+                "edge_type_to_perturb": edge_type,
+                "edge_budget": 0,
+                "num_added_edges": 0,
+                "hub_node_type": edge_type[2] if edge_type[0] == target else edge_type[0],
+            }
+            return out
+
+        attack_on_src = edge_type[0] == target
+        if not attack_on_src and edge_type[2] != target:
+            raise ValueError("[RoHeAttacker] Selected edge type is not incident to target node type.")
+
+        store = out[edge_type]
+        edge_index = store.edge_index
+        hub_type = edge_type[2] if attack_on_src else edge_type[0]
+        num_hubs = int(out[hub_type].num_nodes)
+        ranked_hubs = self._rank_hubs(out, edge_type, attack_on_src=attack_on_src)
+        edge_budget, degree_sum = self._compute_edge_budget(edge_index, attack_nodes, attack_on_src=attack_on_src)
+        same_type = edge_type[0] == edge_type[2]
+        added_edge_index = self._build_new_edges(
+            edge_index=edge_index,
+            attack_nodes=attack_nodes,
+            ranked_hubs=ranked_hubs,
+            attack_on_src=attack_on_src,
+            edge_budget=edge_budget,
+            same_type=same_type,
+        )
+
+        if added_edge_index.numel() > 0:
+            store.edge_index = torch.cat([edge_index, added_edge_index], dim=1)
+            edge_attr = getattr(store, "edge_attr", None)
+            if edge_attr is not None:
+                if edge_attr.dim() >= 2:
+                    added_attr = torch.zeros(
+                        (added_edge_index.size(1), edge_attr.size(-1)),
+                        dtype=edge_attr.dtype,
+                        device=edge_attr.device,
+                    )
+                else:
+                    added_attr = torch.zeros(
+                        (added_edge_index.size(1),),
+                        dtype=edge_attr.dtype,
+                        device=edge_attr.device,
+                    )
+                store.edge_attr = torch.cat([edge_attr, added_attr], dim=0)
+
+        self.last_attack_info = {
+            "attack_name": "rohe",
+            "target_type": target,
+            "num_adv_nodes": int(attack_nodes_tensor.numel()),
+            **select_info,
+            "edge_type_to_perturb": edge_type,
+            "hub_node_type": hub_type,
+            "control_nodes_degree_sum": int(degree_sum),
+            "edge_budget": int(edge_budget),
+            "num_edges_before": int(edge_index.size(1)),
+            "num_edges_after": int(store.edge_index.size(1)),
+            "num_added_edges": int(added_edge_index.size(1)),
+        }
+        return out
+
 class Metattacker(Attacker):
     def __init__(
         self,

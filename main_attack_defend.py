@@ -16,7 +16,7 @@ from matplotlib import pyplot as plt
 
 from src import loss_fn
 from src.models import HeteroNN, classifier_engine
-from src.attack.attacker import Metattacker, RandomAttacker, MintaAttacker
+from src.attack.attacker import Metattacker, RandomAttacker, MintaAttacker, RoHeAttacker
 from src.attack.pipeline import DefaultPipeline
 from src.attack.surrogate_pipeline import SurrogateAttackPipeline
 from src.attack.defender import DiffusionPurifyDefender
@@ -244,6 +244,16 @@ def main(cfg: DictConfig):
                 surrogate_early_stop_patience=int(getattr(cfg.general, "minta_surrogate_patience", 10)),
                 surrogate_early_stop_min_delta=float(getattr(cfg.general, "minta_surrogate_min_delta", 1e-3)),
                 enable_feature_perturb = False, # 目前仅攻击结构
+                device=device,
+            )
+        elif cfg.general.attack_method == 'rohe':
+            attacker = RoHeAttacker(
+                datamodule,
+                perturb_ratio=cfg.general.sub_edge_perturb_ratio,
+                ctrl_nodes_size=cfg.general.ctrl_nodes_size,
+                target_label=int(getattr(cfg.general, "minta_positive_label", 1)),
+                only_attack_correctly_detected=bool(getattr(cfg.general, "minta_only_attack_correctly_detected", True)),
+                target_node_type=cfg.dataset.target,
                 device=device,
             )
         else:

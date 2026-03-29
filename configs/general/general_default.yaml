@@ -32,7 +32,7 @@ feat_dim: 64
 n_layers: 2
 
 # attacker settings
-attack_method: 'minta'    # 'metattack' | 'random' | 'minta'
+attack_method: 'minta'    # 'metattack' | 'random' | 'minta' | 'rohe'
 perturb_ratio: 0.15 # deprecated, use sub_edge_perturb_ratio and general_edge_perturb_ratio instead
 ctrl_nodes_size: 10
 sub_edge_perturb_ratio: 0.1
