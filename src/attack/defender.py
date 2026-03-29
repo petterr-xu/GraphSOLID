@@ -259,3 +259,127 @@ class DiffusionPurifyDefender(Defender):
         # hetero[edge_type].edge_attr = edge_attr
 
         return hetero
+
+
+class JaccardDefender(Defender):
+    """
+    Jaccard edge-pruning defender for hetero graphs.
+
+    The defender keeps the external graph format as `HeteroData`, but internally
+    treats all node types as one homogeneous node space with padded features,
+    then removes low-similarity edges relation by relation.
+    """
+
+    def __init__(
+        self,
+        threshold: float = 0.01,
+        binarize: bool = True,
+        remove_self_loops: bool = True,
+    ):
+        super().__init__()
+        self.threshold = float(threshold)
+        self.binarize = bool(binarize)
+        self.remove_self_loops = bool(remove_self_loops)
+
+    def to(self, device):
+        return self
+
+    def _build_global_binary_features(self, data: HeteroData) -> Tuple[torch.Tensor, dict]:
+        node_types = list(data.node_types)
+        if len(node_types) == 0:
+            raise ValueError("JaccardDefender received an empty hetero graph.")
+
+        feat_dim = 0
+        device = None
+        for node_type in node_types:
+            x = getattr(data[node_type], "x", None)
+            if x is None:
+                continue
+            if x.dim() == 1:
+                x = x.view(-1, 1)
+            feat_dim = max(feat_dim, int(x.size(-1)))
+            if device is None:
+                device = x.device
+
+        if feat_dim <= 0:
+            raise ValueError("JaccardDefender requires node features on at least one node type.")
+        if device is None:
+            device = torch.device("cpu")
+
+        offsets = {}
+        total_nodes = 0
+        for node_type in node_types:
+            offsets[node_type] = total_nodes
+            total_nodes += int(data[node_type].num_nodes)
+
+        x_global = torch.zeros((total_nodes, feat_dim), dtype=torch.float32, device=device)
+        for node_type in node_types:
+            start = offsets[node_type]
+            count = int(data[node_type].num_nodes)
+            if count == 0:
+                continue
+            x = getattr(data[node_type], "x", None)
+            if x is None:
+                continue
+            if x.dim() == 1:
+                x = x.view(-1, 1)
+            x = x.to(device=device, dtype=torch.float32)
+            x_global[start : start + count, : x.size(-1)] = x
+
+        if self.binarize:
+            x_global = x_global > 0
+        else:
+            x_global = x_global != 0
+        return x_global, offsets
+
+    def _edge_keep_mask(
+        self,
+        x_global: torch.Tensor,
+        edge_index: torch.Tensor,
+        src_offset: int,
+        dst_offset: int,
+    ) -> torch.Tensor:
+        if edge_index.numel() == 0:
+            return torch.zeros(edge_index.size(1), dtype=torch.bool, device=edge_index.device)
+
+        global_src = edge_index[0].to(device=x_global.device, dtype=torch.long) + int(src_offset)
+        global_dst = edge_index[1].to(device=x_global.device, dtype=torch.long) + int(dst_offset)
+
+        src_feat = x_global[global_src]
+        dst_feat = x_global[global_dst]
+        inter = torch.logical_and(src_feat, dst_feat).sum(dim=1)
+        union = torch.logical_or(src_feat, dst_feat).sum(dim=1)
+        sim = inter.to(torch.float32) / union.clamp_min(1).to(torch.float32)
+
+        keep = sim >= self.threshold
+        if self.remove_self_loops:
+            keep = keep & (global_src != global_dst)
+        return keep.to(edge_index.device)
+
+    def defend(self, data: HeteroData) -> HeteroData:
+        if not isinstance(data, HeteroData):
+            raise TypeError(f"JaccardDefender expects HeteroData, got: {type(data)}")
+
+        out: HeteroData = copy.deepcopy(data)
+        x_global, offsets = self._build_global_binary_features(data)
+
+        for edge_type in data.edge_types:
+            src_type, _, dst_type = edge_type
+            edge_store = data[edge_type]
+            edge_index = getattr(edge_store, "edge_index", None)
+            if edge_index is None:
+                continue
+
+            keep = self._edge_keep_mask(
+                x_global=x_global,
+                edge_index=edge_index,
+                src_offset=offsets[src_type],
+                dst_offset=offsets[dst_type],
+            )
+            out[edge_type].edge_index = edge_index[:, keep]
+
+            edge_attr = getattr(edge_store, "edge_attr", None)
+            if edge_attr is not None and edge_attr.size(0) == edge_index.size(1):
+                out[edge_type].edge_attr = edge_attr[keep]
+
+        return out
