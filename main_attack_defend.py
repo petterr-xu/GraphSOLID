@@ -275,28 +275,8 @@ def main(cfg: DictConfig):
         else:
             raise NotImplementedError(f"Unknown defense method {cfg.general.defense_method}")
 
-        classifier = HeteroNN.HeteroGNN_classifier(
-            net=cfg.general.net,
-            target_node=target,
-            metadata=hetero_data.g.metadata(),
-            nhid=cfg.general.feat_dim,
-            nclass=nclass,
-            nlayer=cfg.general.n_layers,
-            dropout=0.5,
-        ).to(device)
-        classifier_optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-3)
-        train_mask = hetero_data.g[target].train_mask
-        class_count = torch.bincount(hetero_data.g[target].y[train_mask].view(-1), minlength=nclass).to(device,torch.float)
-        classifier_criterion = loss_fn.IMB_LOSS("ce",nclass,class_count.detach().cpu().numpy(),device=device)
-        cl_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            classifier_optimizer,
-            mode='min',
-            factor = 0.5,
-            patience = 100,
-            verbose=False,
-        )
-        minta_victim_engine = str(getattr(cfg.general, "minta_victim_engine", "hetero")).lower()
-        if minta_victim_engine == "dense_surrogate":
+        victim_engine = cfg.general.victim_engine
+        if victim_engine == "dense_surrogate":
             input_dim = int(hetero_data.g[target].x.size(-1))
             same_type_edge_types = [et for et in hetero_data.g.edge_types if et[0] == target and et[2] == target]
             classifier_eg = classifier_engine.MintaSurrogateEngine(
@@ -307,7 +287,7 @@ def main(cfg: DictConfig):
                 edge_types_for_adj=same_type_edge_types,
                 device=device,
             ).to(device)
-        elif minta_victim_engine == "rohe":
+        elif victim_engine == "rohe":
             classifier_eg = classifier_engine.RoHeClassifierEngine(
                 input_dim=int(hetero_data.g[target].x.size(-1)),
                 num_classes=nclass,
@@ -321,7 +301,27 @@ def main(cfg: DictConfig):
                 top_t=getattr(cfg.general, "rohe_top_t", 5),
                 device=device,
             ).to(device)
-        else:
+        elif victim_engine == "hetero_classifier":
+            classifier = HeteroNN.HeteroGNN_classifier(
+                net=cfg.general.net,
+                target_node=target,
+                metadata=hetero_data.g.metadata(),
+                nhid=cfg.general.feat_dim,
+                nclass=nclass,
+                nlayer=cfg.general.n_layers,
+                dropout=0.5,
+            ).to(device)
+            classifier_optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-3)
+            train_mask = hetero_data.g[target].train_mask
+            class_count = torch.bincount(hetero_data.g[target].y[train_mask].view(-1), minlength=nclass).to(device,torch.float)
+            classifier_criterion = loss_fn.IMB_LOSS("ce",nclass,class_count.detach().cpu().numpy(),device=device)
+            cl_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                classifier_optimizer,
+                mode='min',
+                factor = 0.5,
+                patience = 100,
+                verbose=False,
+            )
             # Default: use the same hetero classifier family as victim for MintA evaluation.
             classifier_eg = classifier_engine.HeteroClassifierEngine(
                 model=classifier,
@@ -331,6 +331,8 @@ def main(cfg: DictConfig):
                 target_node=cfg.dataset.target,
                 device=device,
             ).to(device)
+        else:
+            raise NotImplementedError(f"Unknown victim engine {cfg.general.victim_engine}")
 
         minta_pipeline = SurrogateAttackPipeline(
             dataset_module=datamodule,

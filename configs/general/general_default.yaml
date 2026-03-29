@@ -27,6 +27,7 @@ final_model_chains_to_save: 20
 evaluate_all_checkpoints: False
 
 # classifier settings
+victim_engine: "hetero_classifier"
 net: 'HeteroSAGE'
 feat_dim: 64
 n_layers: 2
