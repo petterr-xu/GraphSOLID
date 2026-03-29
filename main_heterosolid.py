@@ -232,7 +232,7 @@ for r in range(repeatition):
         # update trainer data
         trainer.update_data(aug_data)
     # train gnn classifier on augmented graph
-    best_val_acc, best_val_f1, test_acc, test_bacc, test_f1, best_measure, recall, minority_recall, majority_recall = trainer.train_classifier_vanilla()
+    best_val_acc, best_val_f1, test_acc, test_bacc, test_f1, best_measure, recall, minority_recall, majority_recall = trainer.train_classifier_vanilla(epochs=args.epochs)
     overall_recall.append(sum(recall)/len(recall))
     overall_mi_recall.append(sum(minority_recall)/len(minority_recall))
     overall_ma_recall.append(sum(majority_recall)/len(majority_recall))
@@ -280,7 +280,7 @@ print(log)
 
 try:
     enhence_str = "vanilla" if args.is_vanilla else "heterosolid"
-    file_name = f"summary_{enhence_str}_{args.net}_{args.dataset}_{args.loss_type}.csv"
+    file_name = f"summary_{enhence_str}_{args.net}_{args.dataset}_{args.loss_type}_{args.imb_ratio}.csv"
     date_str = datetime.now().strftime("%Y-%m-%d")
     file_path = osp.join(hsty_path, 'history_'+date_str)
     os.makedirs(file_path, exist_ok=True)

@@ -150,7 +150,7 @@ class HeteroGNN_classifier(nn.Module):
         if net == 'HeteroSAGE':
             self.gnn = HeteroSAGE(metadata, nhid, num_layers=2)
         elif net == 'HeteroGAT':
-            self.gnn = HeteroGAT(metadata, nhid, num_layers=2)
+            self.gnn = HeteroGAT(metadata, nhid, num_layers=2,num_heads=2)
         elif net == 'RGCN':
             self.gnn = RGCN(metadata, nhid, num_layers=2)
         else:
