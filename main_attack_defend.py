@@ -191,9 +191,12 @@ def main(cfg: DictConfig):
     else:
         raise NotImplementedError("Unknown dataset {}".format(cfg["dataset"]))
 
-    digress_utils.create_folders(cfg)
-    path = '/root/autodl-tmp/outputs/curr/graph-tf-model/checkpoints/graph-tf-model/last-v1.ckpt'
-    model = DiscreteDenoisingDiffusion.load_from_checkpoint(path, **model_kwargs)
+    defense_method = str(getattr(cfg.general, "defense_method", "diffusion")).lower()
+    model = None
+    if defense_method == "diffusion":
+        digress_utils.create_folders(cfg)
+        path = '/root/autodl-tmp/outputs/curr/graph-tf-model/checkpoints/graph-tf-model/last-v1.ckpt'
+        model = DiscreteDenoisingDiffusion.load_from_checkpoint(path, **model_kwargs)
     
     gpu = cfg.general.gpus
     if gpu == 0:
@@ -202,7 +205,8 @@ def main(cfg: DictConfig):
     else:
         gpuid = gpu - 1
         device = f'cuda:{gpuid}'
-    model = model.to(device)
+    if model is not None:
+        model = model.to(device)
     target = cfg.dataset.target
     nclass = hetero_data.n_classes
     print(hetero_data.g.metadata())
@@ -259,7 +263,6 @@ def main(cfg: DictConfig):
         else:
             raise NotImplementedError("Unknown attack method {}".format(cfg.general.attack_method))
 
-        defense_method = str(getattr(cfg.general, "defense_method", "diffusion")).lower()
         if defense_method in {"none", "null", "false", "off"}:
             defender = None
         elif defense_method == "diffusion":
@@ -302,6 +305,20 @@ def main(cfg: DictConfig):
                 num_classes=nclass,
                 target_node=cfg.dataset.target,
                 edge_types_for_adj=same_type_edge_types,
+                device=device,
+            ).to(device)
+        elif minta_victim_engine == "rohe":
+            classifier_eg = classifier_engine.RoHeClassifierEngine(
+                input_dim=int(hetero_data.g[target].x.size(-1)),
+                num_classes=nclass,
+                target_node=cfg.dataset.target,
+                meta_paths=cfg.dataset.metapaths,
+                hidden_size=int(getattr(cfg.general, "rohe_hidden_units", 8)),
+                num_heads=[int(getattr(cfg.general, "rohe_num_heads", 8))],
+                dropout=float(getattr(cfg.general, "rohe_dropout", 0.6)),
+                lr=float(getattr(cfg.general, "rohe_lr", 0.005)),
+                weight_decay=float(getattr(cfg.general, "rohe_weight_decay", 0.001)),
+                top_t=getattr(cfg.general, "rohe_top_t", 5),
                 device=device,
             ).to(device)
         else:

@@ -1,5 +1,8 @@
 import copy
 import hashlib
+import importlib
+import os
+import sys
 import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
@@ -397,6 +400,277 @@ class MintaSurrogateEngine(ClassifierEngine):
             val_loss = self.criterion(output[val_mask], y[val_mask])
 
         return loss.item(), val_loss.item()
+
+
+class RoHeClassifierEngine(ClassifierEngine):
+    """
+    Thin wrapper around the released HAN-RoHe model.
+
+    The engine accepts PyG `HeteroData`, converts it to a DGL heterograph,
+    constructs RoHe transition priors for the configured meta-paths, and then
+    reuses the current surrogate pipeline train/eval lifecycle.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        num_classes: int,
+        target_node: str,
+        meta_paths,
+        hidden_size: int = 8,
+        num_heads: Optional[list] = None,
+        dropout: float = 0.6,
+        lr: float = 0.005,
+        weight_decay: float = 0.001,
+        top_t: Any = 5,
+        device: str = "cpu",
+    ):
+        self.target_node = target_node
+        self.meta_paths = self._normalize_meta_paths(meta_paths)
+        self.hidden_size = int(hidden_size)
+        self.num_heads = list(num_heads) if num_heads is not None else [8]
+        self.dropout = float(dropout)
+        self.lr = float(lr)
+        self.weight_decay = float(weight_decay)
+        self.top_t = top_t
+        self.device = device
+        self._dgl = None
+        self._model = self._build_model(input_dim=input_dim, num_classes=num_classes)
+        self.optimizer = torch.optim.Adam(self._model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        self.criterion = nn.CrossEntropyLoss()
+        self.to(device)
+
+    @property
+    def model(self) -> nn.Module:
+        return self._model
+
+    def _ensure_rohe_backend(self):
+        if self._dgl is not None:
+            return
+        try:
+            self._dgl = importlib.import_module("dgl")
+        except ImportError as exc:
+            raise ImportError(
+                "RoHeClassifierEngine requires `dgl`, but it is not installed in the current environment."
+            ) from exc
+
+        repo_rohe_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "RoHe")
+        if repo_rohe_dir not in sys.path:
+            sys.path.insert(0, repo_rohe_dir)
+        try:
+            rohe_module = importlib.import_module("HAN_RoHe.model")
+        except ImportError as exc:
+            raise ImportError(
+                "Failed to import released HAN-RoHe model from `src/RoHe/HAN_RoHe/model.py`."
+            ) from exc
+        self._rohe_model_cls = getattr(rohe_module, "HAN")
+
+    @staticmethod
+    def _normalize_meta_paths(meta_paths) -> list:
+        normalized = []
+        for mp in meta_paths:
+            if len(mp) == 3 and isinstance(mp[0], str):
+                normalized.append([tuple(mp)])
+            else:
+                normalized.append([tuple(step) for step in mp])
+        if len(normalized) == 0:
+            raise ValueError("RoHeClassifierEngine requires non-empty meta_paths.")
+        return normalized
+
+    @staticmethod
+    def _to_label_index(y: torch.Tensor) -> torch.Tensor:
+        if y.dim() > 1 and y.size(-1) > 1:
+            return y.argmax(dim=-1).to(torch.long)
+        return y.view(-1).to(torch.long)
+
+    def _resolve_top_t(self, n_meta_paths: int, num_target_nodes: int) -> list:
+        if isinstance(self.top_t, (list, tuple)):
+            values = list(self.top_t)
+        else:
+            values = [self.top_t] * n_meta_paths
+        if len(values) != n_meta_paths:
+            raise ValueError(f"Expected {n_meta_paths} RoHe top_t values, got {len(values)}.")
+        out = []
+        max_t = max(1, int(num_target_nodes))
+        for v in values:
+            t = int(v)
+            out.append(max(1, min(t, max_t)))
+        return out
+
+    def _build_model(self, input_dim: int, num_classes: int) -> nn.Module:
+        self._ensure_rohe_backend()
+        dummy_settings = [
+            {"T": 1, "device": self.device, "TransM": sp.eye(1, format="csc")}
+            for _ in self.meta_paths
+        ]
+        return self._rohe_model_cls(
+            meta_paths=self.meta_paths,
+            in_size=int(input_dim),
+            hidden_size=int(self.hidden_size),
+            out_size=int(num_classes),
+            num_heads=self.num_heads,
+            dropout=float(self.dropout),
+            settings=dummy_settings,
+        )
+
+    def to(self, device: str):
+        if device is None:
+            raise ValueError("Device must be specified.")
+        self.device = device
+        self._model.to(device)
+        return self
+
+    def snapshot_state(self) -> Dict[str, Any]:
+        return {
+            "model": copy.deepcopy(self._model.state_dict()),
+            "optimizer": copy.deepcopy(self.optimizer.state_dict()),
+        }
+
+    def reset_from_snapshot(self, snapshot: Dict[str, Any], prefer_reset_parameters: bool = True):
+        self._model.load_state_dict(copy.deepcopy(snapshot["model"]))
+        self.optimizer.load_state_dict(copy.deepcopy(snapshot["optimizer"]))
+        self.to(self.device)
+
+    def _build_base_adjs(self, graph: HeteroData) -> Dict[tuple, sp.csr_matrix]:
+        base_adjs = {}
+        for edge_type in graph.edge_types:
+            src_type, _, dst_type = edge_type
+            edge_index = graph[edge_type].edge_index.detach().cpu()
+            num_src = int(graph[src_type].num_nodes)
+            num_dst = int(graph[dst_type].num_nodes)
+            if edge_index.numel() == 0:
+                adj = sp.csr_matrix((num_src, num_dst), dtype=np.float32)
+            else:
+                src = edge_index[0].numpy()
+                dst = edge_index[1].numpy()
+                values = np.ones(src.shape[0], dtype=np.float32)
+                adj = sp.csr_matrix((values, (src, dst)), shape=(num_src, num_dst), dtype=np.float32)
+            base_adjs[tuple(edge_type)] = adj
+        return base_adjs
+
+    @staticmethod
+    def _row_normalize_sparse(adj: sp.spmatrix) -> sp.csr_matrix:
+        adj = adj.tocsr().astype(np.float32)
+        deg = np.asarray(adj.sum(1)).reshape(-1)
+        deg_inv = np.zeros_like(deg, dtype=np.float32)
+        nonzero = deg > 0
+        deg_inv[nonzero] = 1.0 / deg[nonzero]
+        return sp.diags(deg_inv).dot(adj).tocsr()
+
+    def _build_transition_matrices(self, graph: HeteroData) -> list:
+        base_adjs = self._build_base_adjs(graph)
+        normalized = {k: self._row_normalize_sparse(v) for k, v in base_adjs.items()}
+        transitions = []
+        for meta_path in self.meta_paths:
+            trans = normalized[meta_path[0]]
+            for step in meta_path[1:]:
+                trans = trans.dot(normalized[step])
+            transitions.append(sp.csc_matrix(trans))
+        return transitions
+
+    def _build_settings(self, graph: HeteroData) -> list:
+        trans_list = self._build_transition_matrices(graph)
+        top_t_values = self._resolve_top_t(len(trans_list), int(graph[self.target_node].num_nodes))
+        return [
+            {
+                "T": int(top_t_values[i]),
+                "device": self.device,
+                "TransM": trans_list[i],
+            }
+            for i in range(len(trans_list))
+        ]
+
+    def _apply_settings(self, settings: list) -> None:
+        for layer in self._model.layers:
+            for i, gat_layer in enumerate(layer.gat_layers):
+                gat_layer.settings = settings[i]
+
+    def _build_dgl_graph(self, graph: HeteroData):
+        self._ensure_rohe_backend()
+        num_nodes_dict = {nt: int(graph[nt].num_nodes) for nt in graph.node_types}
+        graph_data = {}
+        for edge_type in graph.edge_types:
+            edge_index = graph[edge_type].edge_index.detach().cpu()
+            graph_data[tuple(edge_type)] = (
+                edge_index[0].to(torch.long),
+                edge_index[1].to(torch.long),
+            )
+        hg = self._dgl.heterograph(graph_data, num_nodes_dict=num_nodes_dict)
+        return hg.to(self.device)
+
+    def _forward_graph(self, graph: HeteroData) -> torch.Tensor:
+        if not isinstance(graph, HeteroData):
+            raise TypeError(f"RoHeClassifierEngine expects HeteroData, got {type(graph)}")
+        if self.target_node not in graph.node_types:
+            raise ValueError(f"Target node type '{self.target_node}' not found in graph.")
+
+        settings = self._build_settings(graph)
+        self._apply_settings(settings)
+        hg = self._build_dgl_graph(graph)
+        features = graph[self.target_node].x.to(self.device, dtype=torch.float)
+        return self._model(hg, features)
+
+    @torch.no_grad()
+    def eval_on_graph(self, graph, split: str, target_type: str) -> Dict[str, Any]:
+        if target_type != self.target_node:
+            raise ValueError(
+                f"RoHeClassifierEngine target mismatch: engine={self.target_node}, requested={target_type}."
+            )
+
+        g = graph
+        y_true = self._to_label_index(g[target_type].y.to(self.device))
+        mask = getattr(g[target_type], f"{split}_mask").to(self.device)
+
+        self._model.eval()
+        logits = self._forward_graph(g)
+        pred = logits.argmax(dim=-1)
+        num_classes = int(logits.size(-1))
+
+        idx = mask.nonzero(as_tuple=False).view(-1)
+        num = int(idx.numel())
+        if num == 0:
+            correct = 0
+            acc = float("nan")
+            confusion = torch.zeros((num_classes, num_classes), dtype=torch.long)
+        else:
+            correct = int((pred[idx] == y_true[idx]).sum().item())
+            acc = correct / num
+            flat = (y_true[idx] * num_classes + pred[idx]).to(torch.long)
+            confusion = torch.bincount(flat, minlength=num_classes * num_classes).view(num_classes, num_classes)
+
+        return {
+            "acc": acc,
+            "num_eval": num,
+            "num_correct": correct,
+            "num_classes": num_classes,
+            "confusion": confusion.detach().cpu(),
+            "y_true": y_true[idx].detach().cpu(),
+            "y_pred": pred[idx].detach().cpu(),
+            "logits": logits[idx].detach().cpu(),
+            "node_idx": idx.detach().cpu(),
+        }
+
+    def train_oneloop(self, data):
+        if not isinstance(data, HeteroData):
+            raise TypeError(f"RoHeClassifierEngine expects HeteroData, got {type(data)}")
+
+        y = self._to_label_index(data[self.target_node].y.to(self.device))
+        train_mask = data[self.target_node].train_mask.to(self.device)
+        val_mask = data[self.target_node].val_mask.to(self.device)
+
+        self._model.train()
+        self.optimizer.zero_grad()
+        logits = self._forward_graph(data)
+        loss = self.criterion(logits[train_mask], y[train_mask])
+        loss.backward()
+        self.optimizer.step()
+
+        with torch.no_grad():
+            self._model.eval()
+            out = self._forward_graph(data)
+            val_loss = self.criterion(out[val_mask], y[val_mask])
+
+        return float(loss.item()), float(val_loss.item())
 
 
 class MetaSurrogateEngine(ClassifierEngine):
