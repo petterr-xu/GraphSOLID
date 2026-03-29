@@ -1149,7 +1149,18 @@ class MintaAttacker(Attacker):
         y_test = y[test_mask].cpu().numpy()
         mal_idx = test_idx[y_test == self.positive_label]
         if len(mal_idx) == 0:
-            raise ValueError("[MintaAttacker] No malicious test nodes found for adversarial sampling.")
+            empty = np.array([], dtype=int)
+            info = {
+                "num_test_nodes": int(len(test_idx)),
+                "num_malicious_test_nodes": 0,
+                "num_control_nodes": 0,
+                "num_detected_attack_nodes": 0,
+                "selected_adv_nodes": 0,
+                "skip_attack_due_to_no_detected_nodes": True,
+                "skip_attack_due_to_no_positive_test_nodes": True,
+                "positive_label": int(self.positive_label),
+            }
+            return empty, empty, info
 
         k_control = min(self.ctrl_nodes_size, len(mal_idx))
         control_nodes = np.array(random.sample(list(mal_idx), k_control), dtype=int)
@@ -1171,6 +1182,7 @@ class MintaAttacker(Attacker):
             "num_detected_attack_nodes": int(len(detected_attack_nodes)),
             "selected_adv_nodes": int(len(attack_nodes)),
             "skip_attack_due_to_no_detected_nodes": bool(len(attack_nodes) == 0),
+            "skip_attack_due_to_no_positive_test_nodes": False,
             "positive_label": int(self.positive_label),
         }
         return control_nodes, attack_nodes, info
