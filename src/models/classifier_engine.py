@@ -1,6 +1,5 @@
 import copy
 import hashlib
-import importlib
 import os
 import sys
 import warnings
@@ -16,6 +15,20 @@ from torch_geometric.data import Data, HeteroData
 
 from src.gnn_meta_attack.metattack import meta_gradient_attack as mtk
 from src.utils import graphbuilder
+
+_ROHE_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "RoHe")
+if _ROHE_ROOT not in sys.path:
+    sys.path.insert(0, _ROHE_ROOT)
+
+try:
+    import dgl
+except ImportError:
+    dgl = None
+
+try:
+    from HAN_RoHe.model import HAN as RoHeHAN
+except ImportError:
+    RoHeHAN = None
 
 
 class ClassifierEngine(ABC):
@@ -434,7 +447,6 @@ class RoHeClassifierEngine(ClassifierEngine):
         self.weight_decay = float(weight_decay)
         self.top_t = top_t
         self.device = device
-        self._dgl = None
         self._model = self._build_model(input_dim=input_dim, num_classes=num_classes)
         self.optimizer = torch.optim.Adam(self._model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.criterion = nn.CrossEntropyLoss()
@@ -444,26 +456,16 @@ class RoHeClassifierEngine(ClassifierEngine):
     def model(self) -> nn.Module:
         return self._model
 
-    def _ensure_rohe_backend(self):
-        if self._dgl is not None:
-            return
-        try:
-            self._dgl = importlib.import_module("dgl")
-        except ImportError as exc:
+    @staticmethod
+    def _check_rohe_backend():
+        if dgl is None:
             raise ImportError(
                 "RoHeClassifierEngine requires `dgl`, but it is not installed in the current environment."
-            ) from exc
-
-        repo_rohe_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "RoHe")
-        if repo_rohe_dir not in sys.path:
-            sys.path.insert(0, repo_rohe_dir)
-        try:
-            rohe_module = importlib.import_module("HAN_RoHe.model")
-        except ImportError as exc:
+            )
+        if RoHeHAN is None:
             raise ImportError(
                 "Failed to import released HAN-RoHe model from `src/RoHe/HAN_RoHe/model.py`."
-            ) from exc
-        self._rohe_model_cls = getattr(rohe_module, "HAN")
+            )
 
     @staticmethod
     def _normalize_meta_paths(meta_paths) -> list:
@@ -498,12 +500,12 @@ class RoHeClassifierEngine(ClassifierEngine):
         return out
 
     def _build_model(self, input_dim: int, num_classes: int) -> nn.Module:
-        self._ensure_rohe_backend()
+        self._check_rohe_backend()
         dummy_settings = [
             {"T": 1, "device": self.device, "TransM": sp.eye(1, format="csc")}
             for _ in self.meta_paths
         ]
-        return self._rohe_model_cls(
+        return RoHeHAN(
             meta_paths=self.meta_paths,
             in_size=int(input_dim),
             hidden_size=int(self.hidden_size),
@@ -586,7 +588,7 @@ class RoHeClassifierEngine(ClassifierEngine):
                 gat_layer.settings = settings[i]
 
     def _build_dgl_graph(self, graph: HeteroData):
-        self._ensure_rohe_backend()
+        self._check_rohe_backend()
         num_nodes_dict = {nt: int(graph[nt].num_nodes) for nt in graph.node_types}
         graph_data = {}
         for edge_type in graph.edge_types:
@@ -595,7 +597,7 @@ class RoHeClassifierEngine(ClassifierEngine):
                 edge_index[0].to(torch.long),
                 edge_index[1].to(torch.long),
             )
-        hg = self._dgl.heterograph(graph_data, num_nodes_dict=num_nodes_dict)
+        hg = dgl.heterograph(graph_data, num_nodes_dict=num_nodes_dict)
         return hg.to(self.device)
 
     def _forward_graph(self, graph: HeteroData) -> torch.Tensor:
