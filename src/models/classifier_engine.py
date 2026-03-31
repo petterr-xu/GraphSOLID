@@ -436,6 +436,7 @@ class RoHeClassifierEngine(ClassifierEngine):
         lr: float = 0.005,
         weight_decay: float = 0.001,
         top_t: Any = 5,
+        class_weight: Optional[torch.Tensor] = None,
         device: str = "cpu",
     ):
         self.target_node = target_node
@@ -446,10 +447,13 @@ class RoHeClassifierEngine(ClassifierEngine):
         self.lr = float(lr)
         self.weight_decay = float(weight_decay)
         self.top_t = top_t
+        self.class_weight = None if class_weight is None else class_weight.detach().clone().to(torch.float)
         self.device = device
         self._model = self._build_model(input_dim=input_dim, num_classes=num_classes)
         self.optimizer = torch.optim.Adam(self._model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = nn.CrossEntropyLoss(
+            weight=None if self.class_weight is None else self.class_weight.to(device)
+        )
         self.to(device)
 
     @property
@@ -520,6 +524,9 @@ class RoHeClassifierEngine(ClassifierEngine):
             raise ValueError("Device must be specified.")
         self.device = device
         self._model.to(device)
+        if self.class_weight is not None:
+            self.class_weight = self.class_weight.to(device)
+            self.criterion = nn.CrossEntropyLoss(weight=self.class_weight)
         return self
 
     def snapshot_state(self) -> Dict[str, Any]:

@@ -102,6 +102,16 @@ def _build_summary_rows(trial_rows):
     return out
 
 
+def _make_inverse_freq_class_weight(class_count: torch.Tensor) -> torch.Tensor:
+    class_count = class_count.to(torch.float)
+    weight = torch.zeros_like(class_count, dtype=torch.float)
+    nonzero = class_count > 0
+    if bool(nonzero.any().item()):
+        present = class_count[nonzero]
+        weight[nonzero] = present.sum() / (present.numel() * present)
+    return weight
+
+
 def load_imb_data(dataset, imb_ratio = 0, keep_edge=True,device='cpu'):
     root_path = osp.dirname(osp.realpath(__file__))
     loader = GraphDataLoader()
@@ -281,6 +291,9 @@ def main(cfg: DictConfig):
         else:
             raise NotImplementedError(f"Unknown defense method {cfg.general.defense_method}")
 
+        train_mask = hetero_data.g[target].train_mask
+        class_count = torch.bincount(hetero_data.g[target].y[train_mask].view(-1), minlength=nclass).to(device, torch.float)
+
         victim_engine = cfg.general.victim_engine
         if victim_engine == "dense_surrogate":
             input_dim = int(hetero_data.g[target].x.size(-1))
@@ -294,6 +307,9 @@ def main(cfg: DictConfig):
                 device=device,
             ).to(device)
         elif victim_engine == "rohe":
+            rohe_class_weight = None
+            if bool(getattr(cfg.general, "rohe_reweight_loss", True)):
+                rohe_class_weight = _make_inverse_freq_class_weight(class_count)
             classifier_eg = classifier_engine.RoHeClassifierEngine(
                 input_dim=int(hetero_data.g[target].x.size(-1)),
                 num_classes=nclass,
@@ -305,6 +321,7 @@ def main(cfg: DictConfig):
                 lr=float(getattr(cfg.general, "rohe_lr", 0.005)),
                 weight_decay=float(getattr(cfg.general, "rohe_weight_decay", 0.001)),
                 top_t=getattr(cfg.general, "rohe_top_t", 5),
+                class_weight=rohe_class_weight,
                 device=device,
             ).to(device)
         elif victim_engine == "hetero_classifier":
@@ -318,8 +335,6 @@ def main(cfg: DictConfig):
                 dropout=0.5,
             ).to(device)
             classifier_optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-3)
-            train_mask = hetero_data.g[target].train_mask
-            class_count = torch.bincount(hetero_data.g[target].y[train_mask].view(-1), minlength=nclass).to(device,torch.float)
             classifier_criterion = loss_fn.IMB_LOSS("ce",nclass,class_count.detach().cpu().numpy(),device=device)
             cl_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 classifier_optimizer,
