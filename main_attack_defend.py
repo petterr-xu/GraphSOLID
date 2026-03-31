@@ -203,10 +203,6 @@ def main(cfg: DictConfig):
 
     defense_method = str(getattr(cfg.general, "defense_method", "diffusion")).lower()
     model = None
-    if defense_method == "diffusion":
-        digress_utils.create_folders(cfg)
-        path = '/root/autodl-tmp/outputs/curr/graph-tf-model/checkpoints/graph-tf-model/last-v1.ckpt'
-        model = DiscreteDenoisingDiffusion.load_from_checkpoint(path, **model_kwargs)
     
     gpu = cfg.general.gpus
     if gpu == 0:
@@ -215,8 +211,6 @@ def main(cfg: DictConfig):
     else:
         gpuid = gpu - 1
         device = f'cuda:{gpuid}'
-    if model is not None:
-        model = model.to(device)
     target = cfg.dataset.target
     nclass = hetero_data.n_classes
     print(hetero_data.g.metadata())
@@ -276,6 +270,10 @@ def main(cfg: DictConfig):
         if defense_method in {"none", "null", "false", "off"}:
             defender = None
         elif defense_method == "diffusion":
+            digress_utils.create_folders(cfg)
+            path = '/root/autodl-tmp/outputs/curr/graph-tf-model/checkpoints/graph-tf-model/last-v1.ckpt'
+            model = DiscreteDenoisingDiffusion.load_from_checkpoint(path, **model_kwargs)
+            model = model.to(device)
             defender = DiffusionPurifyDefender(
                 diffusion_steps=cfg.general.purify_steps,
                 diffusion_model=model,
@@ -298,7 +296,7 @@ def main(cfg: DictConfig):
                 self_loop=bool(getattr(cfg.general, "gprgae_self_loop", False)),
                 activation_str=str(getattr(cfg.general, "gprgae_activation", "elu")),
                 concat_activation_str=str(getattr(cfg.general, "gprgae_concat_activation", "elu")),
-                lr=float(getattr(cfg.general, "gprgae_lr", 1e-2)),
+                lr=float(getattr(cfg.general, "gprgae_lr", 1e-3)),
                 weight_decay=float(getattr(cfg.general, "gprgae_weight_decay", 1e-4)),
                 train_epochs=int(getattr(cfg.general, "gprgae_train_epochs", 100)),
                 negative_ratio=float(getattr(cfg.general, "gprgae_negative_ratio", 1.0)),

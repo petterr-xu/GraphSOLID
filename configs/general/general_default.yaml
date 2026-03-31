@@ -52,7 +52,7 @@ gprgae_dropout_mlp: 0.7
 gprgae_self_loop: false
 gprgae_activation: 'elu'
 gprgae_concat_activation: 'elu'
-gprgae_lr: 0.01
+gprgae_lr: 0.001
 gprgae_weight_decay: 0.0001
 gprgae_train_epochs: 100
 gprgae_negative_ratio: 1.0
