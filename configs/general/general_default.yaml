@@ -40,11 +40,26 @@ sub_edge_perturb_ratio: 0.9
 general_edge_perturb_ratio: 0.15
 
 # defender settings
-defense_method: 'diffusion'   # 'none' | 'diffusion' | 'jaccard'
+defense_method: 'diffusion'   # 'none' | 'diffusion' | 'jaccard' | 'gprgae'
 purify_steps: 10
 jaccard_threshold: 0.01
 jaccard_binarize: true
 jaccard_remove_self_loops: true
+gprgae_hidden: 128
+gprgae_K: 7
+gprgae_dropout_link: 0.0
+gprgae_dropout_mlp: 0.7
+gprgae_self_loop: false
+gprgae_activation: 'elu'
+gprgae_concat_activation: 'elu'
+gprgae_lr: 0.01
+gprgae_weight_decay: 0.0001
+gprgae_train_epochs: 100
+gprgae_negative_ratio: 1.0
+gprgae_purify_steps: 5
+gprgae_purify_tol: 0.0001
+gprgae_edge_keep_threshold: 0.5
+gprgae_batch_decode: true
 
 # repeated experiment settings (for main_attack_defend.py)
 trial_runs: 5

@@ -19,7 +19,7 @@ from src.models import HeteroNN, classifier_engine
 from src.attack.attacker import Metattacker, RandomAttacker, MintaAttacker, RoHeAttacker
 from src.attack.pipeline import DefaultPipeline
 from src.attack.surrogate_pipeline import SurrogateAttackPipeline
-from src.attack.defender import DiffusionPurifyDefender, JaccardDefender
+from src.attack.defender import DiffusionPurifyDefender, JaccardDefender, GPRGAEDefender
 from src.utils import VNG_utils, graphbuilder
 from src.utils.hetero_dataset_util import GraphDataLoader
 from src.DiGress.src import utils as digress_utils
@@ -288,6 +288,26 @@ def main(cfg: DictConfig):
                 binarize=bool(getattr(cfg.general, "jaccard_binarize", True)),
                 remove_self_loops=bool(getattr(cfg.general, "jaccard_remove_self_loops", True)),
             )
+        elif defense_method == "gprgae":
+            defender = GPRGAEDefender(
+                target_node_type=cfg.dataset.target,
+                hidden=int(getattr(cfg.general, "gprgae_hidden", 128)),
+                K=int(getattr(cfg.general, "gprgae_K", 7)),
+                dropout_link=float(getattr(cfg.general, "gprgae_dropout_link", 0.0)),
+                dropout_mlp=float(getattr(cfg.general, "gprgae_dropout_mlp", 0.7)),
+                self_loop=bool(getattr(cfg.general, "gprgae_self_loop", False)),
+                activation_str=str(getattr(cfg.general, "gprgae_activation", "elu")),
+                concat_activation_str=str(getattr(cfg.general, "gprgae_concat_activation", "elu")),
+                lr=float(getattr(cfg.general, "gprgae_lr", 1e-2)),
+                weight_decay=float(getattr(cfg.general, "gprgae_weight_decay", 1e-4)),
+                train_epochs=int(getattr(cfg.general, "gprgae_train_epochs", 100)),
+                negative_ratio=float(getattr(cfg.general, "gprgae_negative_ratio", 1.0)),
+                purify_steps=int(getattr(cfg.general, "gprgae_purify_steps", 5)),
+                purify_tol=float(getattr(cfg.general, "gprgae_purify_tol", 1e-4)),
+                edge_keep_threshold=float(getattr(cfg.general, "gprgae_edge_keep_threshold", 0.5)),
+                batch_decode=bool(getattr(cfg.general, "gprgae_batch_decode", True)),
+            ).to(device)
+            defender.fit(datamodule.hetero_datasets["train"])
         else:
             raise NotImplementedError(f"Unknown defense method {cfg.general.defense_method}")
 

@@ -1,10 +1,18 @@
 import copy
+import os
+import sys
 from typing import Any, List, Sequence, Tuple, Union, Optional
 
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data, HeteroData
-from torch_geometric.utils import to_undirected
+from torch_geometric.utils import negative_sampling, to_undirected
+
+_GPR_GAE_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "GPR-GAE")
+if _GPR_GAE_ROOT not in sys.path:
+    sys.path.insert(0, _GPR_GAE_ROOT)
+
+from robust_diffusion.models.gprgae import GPRGAE
 
 try:
     # If your project provides it, prefer the exact same extraction logic as the dataset.
@@ -381,5 +389,174 @@ class JaccardDefender(Defender):
             edge_attr = getattr(edge_store, "edge_attr", None)
             if edge_attr is not None and edge_attr.size(0) == edge_index.size(1):
                 out[edge_type].edge_attr = edge_attr[keep]
+
+        return out
+
+
+class GPRGAEDefender(Defender):
+    """
+    Minimal GPR-GAE purifier wrapper for target-target relations in a hetero graph.
+    """
+
+    def __init__(
+        self,
+        target_node_type: str,
+        hidden: int = 128,
+        K: int = 7,
+        dropout_link: float = 0.0,
+        dropout_mlp: float = 0.7,
+        self_loop: bool = False,
+        activation_str: str = "elu",
+        concat_activation_str: str = "elu",
+        lr: float = 1e-2,
+        weight_decay: float = 1e-4,
+        train_epochs: int = 100,
+        negative_ratio: float = 1.0,
+        purify_steps: int = 5,
+        purify_tol: float = 1e-4,
+        edge_keep_threshold: float = 0.5,
+        batch_decode: bool = True,
+    ):
+        super().__init__()
+        self.target_node_type = target_node_type
+        self.hidden = int(hidden)
+        self.K = int(K)
+        self.dropout_link = float(dropout_link)
+        self.dropout_mlp = float(dropout_mlp)
+        self.self_loop = bool(self_loop)
+        self.activation_str = activation_str
+        self.concat_activation_str = concat_activation_str
+        self.lr = float(lr)
+        self.weight_decay = float(weight_decay)
+        self.train_epochs = int(train_epochs)
+        self.negative_ratio = float(negative_ratio)
+        self.purify_steps = int(purify_steps)
+        self.purify_tol = float(purify_tol)
+        self.edge_keep_threshold = float(edge_keep_threshold)
+        self.batch_decode = bool(batch_decode)
+        self.device = "cpu"
+        self.model: Optional[GPRGAE] = None
+        self.optimizer: Optional[torch.optim.Optimizer] = None
+
+    def to(self, device):
+        self.device = device
+        if self.model is not None:
+            self.model.to(device)
+        return self
+
+    def _ensure_model(self, input_dim: int) -> None:
+        if self.model is not None:
+            return
+        self.model = GPRGAE(
+            n_features=int(input_dim),
+            hidden=self.hidden,
+            K=self.K,
+            dropout_link=self.dropout_link,
+            dropout_MLP=self.dropout_mlp,
+            self_loop=self.self_loop,
+            activation_str=self.activation_str,
+            concat_activation_str=self.concat_activation_str,
+        ).to(self.device)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+
+    def _target_edge_types(self, graph: HeteroData) -> List[Tuple[str, str, str]]:
+        return [et for et in graph.edge_types if et[0] == self.target_node_type and et[2] == self.target_node_type]
+
+    def _prepare_relation_graph(self, graph: HeteroData, edge_type: Tuple[str, str, str]) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = graph[self.target_node_type].x.to(self.device, dtype=torch.float)
+        edge_index = graph[edge_type].edge_index.to(self.device)
+        if edge_index.numel() == 0:
+            edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
+        else:
+            edge_index = to_undirected(edge_index, num_nodes=int(graph[self.target_node_type].num_nodes))
+        edge_weight = torch.ones(edge_index.size(1), dtype=x.dtype, device=self.device)
+        return x, edge_index
+
+    def _sample_negative_edges(self, num_nodes: int, pos_edge_index: torch.Tensor) -> torch.Tensor:
+        if pos_edge_index.numel() == 0:
+            return torch.empty((2, 0), dtype=torch.long, device=pos_edge_index.device)
+        num_pos_undir = max(1, pos_edge_index.size(1) // 2)
+        num_neg = max(1, int(round(self.negative_ratio * num_pos_undir)))
+        neg_edge_index = negative_sampling(
+            pos_edge_index,
+            num_nodes=num_nodes,
+            num_neg_samples=num_neg,
+            force_undirected=True,
+        ).to(pos_edge_index.device)
+        return torch.cat([neg_edge_index, neg_edge_index[[1, 0]]], dim=1)
+
+    def _self_supervised_loss(self, x: torch.Tensor, edge_index: torch.Tensor) -> Optional[torch.Tensor]:
+        if edge_index.numel() == 0:
+            return None
+        neg_edge_index = self._sample_negative_edges(x.size(0), edge_index)
+        if neg_edge_index.numel() == 0:
+            return None
+
+        pos_pred = self.model.link_prediction(x, (edge_index, torch.ones(edge_index.size(1), device=x.device, dtype=x.dtype)), edge_index)
+        neg_pred = self.model.link_prediction(x, (edge_index, torch.ones(edge_index.size(1), device=x.device, dtype=x.dtype)), neg_edge_index)
+        combined_edges = torch.cat([edge_index, neg_edge_index], dim=1)
+        combined_pred = self.model.link_prediction(x, (edge_index, torch.ones(edge_index.size(1), device=x.device, dtype=x.dtype)), combined_edges)
+        reverse_pred = self.model.link_prediction(x, (edge_index, torch.ones(edge_index.size(1), device=x.device, dtype=x.dtype)), combined_edges[[1, 0]])
+
+        pos_loss = F.binary_cross_entropy(pos_pred, torch.ones_like(pos_pred))
+        neg_loss = F.binary_cross_entropy(neg_pred, torch.zeros_like(neg_pred))
+        reg_loss = F.mse_loss(combined_pred, reverse_pred)
+        return pos_loss + neg_loss + 0.2 * reg_loss
+
+    def fit(self, dataset) -> None:
+        first_graph = dataset[0]
+        input_dim = int(first_graph[self.target_node_type].x.size(-1))
+        self._ensure_model(input_dim)
+        self.model.train()
+
+        for epoch in range(self.train_epochs):
+            losses = []
+            for i in range(len(dataset)):
+                graph = dataset[i]
+                edge_types = self._target_edge_types(graph)
+                if not edge_types:
+                    continue
+                for edge_type in edge_types:
+                    x, edge_index = self._prepare_relation_graph(graph, edge_type)
+                    loss = self._self_supervised_loss(x, edge_index)
+                    if loss is None:
+                        continue
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+                    losses.append(float(loss.item()))
+            if ((epoch + 1) % 10 == 0) or epoch == 0 or (epoch + 1) == self.train_epochs:
+                avg_loss = float(sum(losses) / max(len(losses), 1))
+                print(f"[gprgae:defender] epoch={epoch + 1}/{self.train_epochs} loss={avg_loss:.4f}")
+
+    @torch.no_grad()
+    def defend(self, data: HeteroData) -> HeteroData:
+        if self.model is None:
+            raise RuntimeError("GPRGAEDefender must be fitted before calling defend().")
+        if not isinstance(data, HeteroData):
+            raise TypeError(f"GPRGAEDefender expects HeteroData, got: {type(data)}")
+
+        out: HeteroData = copy.deepcopy(data)
+        self.model.eval()
+
+        for edge_type in self._target_edge_types(data):
+            x, edge_index = self._prepare_relation_graph(data, edge_type)
+            if edge_index.numel() == 0:
+                out[edge_type].edge_index = edge_index
+                continue
+            purified_edge_index, purified_edge_weight = self.model.purify_adj(
+                x,
+                (edge_index, torch.ones(edge_index.size(1), device=x.device, dtype=x.dtype)),
+                batch=self.batch_decode,
+                steps=self.purify_steps,
+                tol=self.purify_tol,
+            )
+            keep = purified_edge_weight >= self.edge_keep_threshold
+            new_edge_index = purified_edge_index[:, keep]
+            out[edge_type].edge_index = new_edge_index.to(data[edge_type].edge_index.device)
+
+            edge_attr = getattr(data[edge_type], "edge_attr", None)
+            if edge_attr is not None:
+                out[edge_type].edge_attr = None
 
         return out

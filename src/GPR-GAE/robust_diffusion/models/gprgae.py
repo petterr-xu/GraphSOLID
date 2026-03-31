@@ -136,25 +136,56 @@ class GPRGAE(MessagePassing):
         lp = self.Sigmoid(data)
         return lp
 
-
-    def forward(self, data, adj,batch = False):
+    def _prepare_edges(self, adj):
         if isinstance(adj, SparseTensor):
             row, col, edge_weight = adj.t().coo()
             edge_index = torch.stack([row, col], dim=0)
         elif isinstance(adj, tuple):
             edge_index, edge_weight = adj
-        
+        else:
+            raise TypeError(f"Unsupported adjacency type: {type(adj)}")
+
         if isinstance(edge_index, SparseTensor):
             row, col, edge_attr = edge_index.t().coo()
             edge_index = torch.stack([row, col], dim=0)
 
-        for i in range(5): ## multi step purification
-            prev = edge_weight.sum()
-            edge_weight = self.link_prediction(data, (edge_index,edge_weight),edge_index,batch = batch).squeeze() + self.link_prediction(data, (edge_index,edge_weight),edge_index[[1,0]],batch = batch).squeeze()
-            edge_weight /= 2
+        return edge_index, edge_weight
 
-            if torch.abs(prev-edge_weight.sum())/prev <= 0.0001:
-                break
+    @torch.no_grad()
+    def purify_adj(self, data, adj, batch=False, steps: int = 5, tol: float = 1e-4):
+        edge_index, edge_weight = self._prepare_edges(adj)
+        if edge_weight is None:
+            edge_weight = torch.ones(edge_index.size(1), dtype=data.dtype, device=data.device)
+        else:
+            edge_weight = edge_weight.to(device=data.device, dtype=data.dtype)
+
+        for _ in range(int(steps)):
+            prev = edge_weight.sum()
+            edge_weight = self.link_prediction(
+                data,
+                (edge_index, edge_weight),
+                edge_index,
+                batch=batch,
+            ).squeeze()
+            edge_weight = (
+                edge_weight
+                + self.link_prediction(
+                    data,
+                    (edge_index, edge_weight),
+                    edge_index[[1, 0]],
+                    batch=batch,
+                ).squeeze()
+            ) / 2
+            if prev.abs().item() > 0:
+                delta = torch.abs(prev - edge_weight.sum()) / prev.abs()
+                if float(delta.item()) <= float(tol):
+                    break
+
+        return edge_index, edge_weight
+
+
+    def forward(self, data, adj,batch = False):
+        edge_index, edge_weight = self.purify_adj(data, adj, batch=batch, steps=5, tol=1e-4)
         
         logits = self.gnn(data, (edge_index,edge_weight))
 
