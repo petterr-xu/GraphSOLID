@@ -83,6 +83,17 @@ def save_metrics_to_csv(
 
         writer.writerow(row)
 
+def save_emb_data(data, save_dir, filename="emb_data.pt"):
+    assert data is not None, "Please run cent_pretrain() or train_teacher_encoder_joint() first."
+    osp.makedirs(save_dir, exist_ok=True)
+    save_path = osp.join(save_dir, filename)
+    torch.save(data.cpu(), save_path)
+    return save_path
+
+def load_emb_data(data, path, update_data=False):
+    emb_data = torch.load(path, map_location=device).to(device)
+    return emb_data
+
 for r in range(repeatition):
     args.seed = args.seed + 1
     ## Fix seed ##
@@ -206,6 +217,7 @@ for r in range(repeatition):
             emb_data = trainer.train_teacher_encoder_joint(args, skip=False, ckpt_path=cktp_path, ckpt_save_epoch=0)
         else:
             emb_data = trainer.cent_pretrain(args, skip=False, ckpt_path=cktp_path, ckpt_save_epoch=0)
+        save_emb_data(emb_data, osp.join(root_path, 'history_data', 'emb_data', args.dataset), filename="emb_data_{}.pt".format(r))
         # cover data with initial embeddings
         trainer.update_data(emb_data)
         if not args.joint_teacher_encoder:
