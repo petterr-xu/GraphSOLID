@@ -85,6 +85,36 @@ class SolidTrainer:
         else:
             raise Exception("No Implentation Loss")
 
+    def _build_emb_data(self):
+        self.encoder.eval()
+        with torch.no_grad():
+            emb_dict = self.encoder(self.data.x_dict, self.data.edge_index_dict)
+            emb_data = copy.deepcopy(self.data)
+            for ntype, embedding in emb_dict.items():
+                emb_data[ntype].x = embedding.detach()
+            self.emb_data = emb_data
+        return emb_data
+
+    def _hetero_recon_loss(self, emb_dict, split):
+        total_loss = 0
+        for edge_type in self.data.edge_types:
+            src_type, _, dst_type = edge_type
+            pos_edge_index = getattr(self.data[edge_type], f"{split}_pos_edge_index")
+            neg_edge_index = negative_sampling(
+                edge_index=pos_edge_index,
+                num_nodes=(self.data[src_type].num_nodes, self.data[dst_type].num_nodes),
+                num_neg_samples=pos_edge_index.size(1)
+            )
+            pos_scores = self.decoder(emb_dict, pos_edge_index, edge_type)
+            neg_scores = self.decoder(emb_dict, neg_edge_index, edge_type)
+            scores = torch.cat([pos_scores, neg_scores])
+            labels = torch.cat([
+                torch.ones(pos_scores.size(0), device=self.device),
+                torch.zeros(neg_scores.size(0), device=self.device)
+            ])
+            total_loss += F.binary_cross_entropy_with_logits(scores, labels)
+        return total_loss
+
     def cent_pretrain_oneloop(self, args):
         device = self.device
         target = self.target
@@ -100,25 +130,7 @@ class SolidTrainer:
         cent_loss = self.centloss_criterion(emb_dict[target][self.data_train_mask], 
                                            self.data[target].y[self.data_train_mask])
 
-        # 计算边重构损失 (遍历所有关系)
-        total_de_loss = 0
-        for edge_type in self.data.edge_types:
-            src_type, rel, dst_type = edge_type
-            
-            # 正样本边
-            pos_edge_index = self.data[edge_type].train_pos_edge_index
-            
-            # 异构负采样：确保采样的点属于该关系对应的节点类型
-            neg_edge_index = negative_sampling(
-                edge_index=pos_edge_index,
-                num_nodes=(self.data[src_type].num_nodes, self.data[dst_type].num_nodes),
-                num_neg_samples=pos_edge_index.size(1)
-            )
-            pos_scores = self.decoder(emb_dict, pos_edge_index, edge_type)
-            neg_scores = self.decoder(emb_dict, neg_edge_index, edge_type)
-            scores = torch.cat([pos_scores, neg_scores])
-            labels = torch.cat([torch.ones(pos_scores.size(0)), torch.zeros(neg_scores.size(0))]).to(device)
-            total_de_loss += F.binary_cross_entropy_with_logits(scores, labels)
+        total_de_loss = self._hetero_recon_loss(emb_dict, "train")
 
         # 4. 反向传播
         loss = args.w_con_loss * cent_loss + total_de_loss
@@ -131,24 +143,7 @@ class SolidTrainer:
             v_emb_dict = self.encoder(self.data.x_dict, self.data.edge_index_dict)
             val_y = self.data[target].y[self.data_val_mask]
             val_cent_loss = self.centloss_criterion(v_emb_dict[target][self.data_val_mask], val_y)
-            val_recon_loss = 0
-            for edge_type in self.data.edge_types:
-                src_t, rel, dst_t = edge_type
-                # 使用验证集特有的正样本边
-                v_pos_edge = self.data[edge_type].val_pos_edge_index
-                
-                # 验证集负采样
-                v_neg_edge = negative_sampling(
-                    edge_index=v_pos_edge,
-                    num_nodes=(self.data[src_t].num_nodes, self.data[dst_t].num_nodes),
-                    num_neg_samples=v_pos_edge.size(1)
-                )
-                v_pos_scores = self.decoder(v_emb_dict, v_pos_edge, edge_type)
-                v_neg_scores = self.decoder(v_emb_dict, v_neg_edge, edge_type)
-
-                v_scores = torch.cat([v_pos_scores, v_neg_scores])
-                v_labels = torch.cat([torch.ones(v_pos_scores.size(0)), torch.zeros(v_neg_scores.size(0))]).to(device)
-                val_recon_loss += F.binary_cross_entropy_with_logits(v_scores, v_labels)
+            val_recon_loss = self._hetero_recon_loss(v_emb_dict, "val")
             
             val_loss = args.w_con_loss * val_cent_loss + val_recon_loss
         
@@ -206,14 +201,108 @@ class SolidTrainer:
                 decoder_path = osp.join(root_path, "ckpt","decoder",self.ctx.name,"decoder_" + self.ctx.name+"_"+ts+".pth")
                 VNG_utils.save(self.decoder,decoder_path)
 
-        self.encoder.eval()
+        return self._build_emb_data()
+
+    def train_teacher_encoder_joint_oneloop(self, args):
+        target = self.target
+        cls_weight = getattr(args, "w_cls_loss", 1.0)
+        con_weight = getattr(args, "w_con_loss", 1.0)
+        recon_weight = getattr(args, "w_recon_loss", 1.0)
+
+        self.encoder.train()
+        self.decoder.train()
+        self.teacher.train()
+        self.centloss_criterion.train()
+        self.en_optimizer.zero_grad()
+        self.de_optimizer.zero_grad()
+        self.teacher_optimizer.zero_grad()
+        self.centloss_optimizer.zero_grad()
+
+        emb_dict = self.encoder(self.data.x_dict, self.data.edge_index_dict)
+        train_emb = emb_dict[target][self.data_train_mask]
+        train_y = self.data[target].y[self.data_train_mask]
+        train_logits = self.teacher(train_emb)
+        cls_loss = F.cross_entropy(train_logits, train_y)
+        cent_loss = self.centloss_criterion(train_emb, train_y)
+        recon_loss = self._hetero_recon_loss(emb_dict, "train")
+        loss = cls_weight * cls_loss + con_weight * cent_loss + recon_weight * recon_loss
+        loss.backward()
+        self.en_optimizer.step()
+        self.de_optimizer.step()
+        self.teacher_optimizer.step()
+        self.centloss_optimizer.step()
+
         with torch.no_grad():
-            emb_dict = self.encoder(self.data.x_dict, self.data.edge_index_dict)
-            emb_data = copy.deepcopy(self.data)
-            for ntype, embedding in emb_dict.items():
-                emb_data[ntype].x = embedding.detach()
-            self.emb_data = emb_data
-        return emb_data
+            self.encoder.eval()
+            self.decoder.eval()
+            self.teacher.eval()
+            self.centloss_criterion.eval()
+            val_emb_dict = self.encoder(self.data.x_dict, self.data.edge_index_dict)
+            val_emb = val_emb_dict[target][self.data_val_mask]
+            val_y = self.data[target].y[self.data_val_mask]
+            val_logits = self.teacher(val_emb)
+            val_cls_loss = F.cross_entropy(val_logits, val_y)
+            val_cent_loss = self.centloss_criterion(val_emb, val_y)
+            val_recon_loss = self._hetero_recon_loss(val_emb_dict, "val")
+            val_loss = cls_weight * val_cls_loss + con_weight * val_cent_loss + recon_weight * val_recon_loss
+        self.de_scheduler.step(val_recon_loss)
+
+        return val_loss, val_cls_loss, val_cent_loss, val_recon_loss
+
+    def train_teacher_encoder_joint(self, args, epochs=None, skip=False, ckpt_path:dict=None, ckpt_save_epoch=0):
+        if skip:
+            assert ckpt_path is not None, "Please provide checkpoint paths for encoder, decoder and teacher."
+            VNG_utils.load(self.encoder, ckpt_path['encoder'])
+            VNG_utils.load(self.decoder, ckpt_path['decoder'])
+            VNG_utils.load(self.teacher, ckpt_path['teacher'])
+            print(f"Loaded joint-trained encoder, decoder and teacher from {ckpt_path}")
+            return self._build_emb_data()
+
+        best_loss = float('inf')
+        patience = getattr(args, "joint_patience", 5)
+        patience_count = 0
+        patience_beta = getattr(args, "joint_patience_beta", 1e-3)
+        arg_epochs = getattr(args, "joint_epochs", None)
+        train_epochs = epochs if epochs is not None else (arg_epochs if arg_epochs else getattr(args, "epochs", 2000))
+        ts = datetime.now().strftime(timestamp_format)
+        with tqdm(total=train_epochs, desc="Joint Teacher-Encoder Training") as pbar:
+            for e in range(train_epochs):
+                val_loss, cls_loss, con_loss, recon_loss = self.train_teacher_encoder_joint_oneloop(args)
+                if val_loss < (best_loss - patience_beta):
+                    best_loss = val_loss
+                    patience_count = 0
+                else:
+                    patience_count += 1
+                pbar.set_postfix({
+                    'Val Loss': f'{val_loss:.4f}',
+                    'Cls Loss': f'{cls_loss:.4f}',
+                    'Con Loss': f'{con_loss:.4f}',
+                    'Recon Loss': f'{recon_loss:.4f}',
+                    'Patience': f'{patience_count}/{patience}'
+                })
+                pbar.update(1)
+                if ckpt_save_epoch > 0 and ((e + 1) % ckpt_save_epoch == 0):
+                    ts = datetime.now().strftime(timestamp_format)
+                    encoder_path = osp.join(root_path, "ckpt", "encoder", self.ctx.name, "joint_encoder_" + self.ctx.name + "_" + ts + f"_e{e}_" + ".pth")
+                    decoder_path = osp.join(root_path, "ckpt", "decoder", self.ctx.name, "joint_decoder_" + self.ctx.name + "_" + ts + f"_e{e}_" + ".pth")
+                    teacher_path = osp.join(root_path, "ckpt", "teacher", self.ctx.name, "joint_teacher_" + self.ctx.name + "_" + ts + f"_e{e}_" + ".pth")
+                    VNG_utils.save(self.encoder, encoder_path)
+                    VNG_utils.save(self.decoder, decoder_path)
+                    VNG_utils.save(self.teacher, teacher_path)
+                if patience_count >= patience:
+                    pbar.write(f"Early stopping at epoch {e+1}")
+                    pbar.close()
+                    break
+
+        if ckpt_save_epoch > 0:
+            encoder_path = osp.join(root_path, "ckpt", "encoder", self.ctx.name, "joint_encoder_" + self.ctx.name + "_" + ts + ".pth")
+            decoder_path = osp.join(root_path, "ckpt", "decoder", self.ctx.name, "joint_decoder_" + self.ctx.name + "_" + ts + ".pth")
+            teacher_path = osp.join(root_path, "ckpt", "teacher", self.ctx.name, "joint_teacher_" + self.ctx.name + "_" + ts + ".pth")
+            VNG_utils.save(self.encoder, encoder_path)
+            VNG_utils.save(self.decoder, decoder_path)
+            VNG_utils.save(self.teacher, teacher_path)
+
+        return self._build_emb_data()
     
     @DeprecationWarning
     def cover_data_with_emb(self):

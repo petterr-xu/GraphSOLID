@@ -31,6 +31,12 @@ def parse_args():
 
     ## teacher setup
     parser.add_argument('--teacher_lr', type=float, default=1e-3, help='learning rate for teacher model')
+    parser.add_argument('--joint_teacher_encoder', action='store_true', help='jointly train encoder and teacher on encoder embeddings')
+    parser.add_argument('--joint_epochs', type=int, default=None, help='epochs for joint teacher-encoder training; defaults to --epochs')
+    parser.add_argument('--joint_patience', type=int, default=5, help='early stopping patience for joint teacher-encoder training')
+    parser.add_argument('--joint_patience_beta', type=float, default=1e-3, help='minimum validation improvement for joint teacher-encoder training')
+    parser.add_argument('--w_cls_loss', type=float, default=1.0, help='classification loss weight for joint teacher-encoder training')
+    parser.add_argument('--w_recon_loss', type=float, default=1.0, help='edge reconstruction loss weight for joint teacher-encoder training')
 
     ## diffusion setup
     parser.add_argument('--wo_diffu_aug', action='store_true', help=' deprecated diffusion generation.')

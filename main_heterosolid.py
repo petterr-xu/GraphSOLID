@@ -202,10 +202,14 @@ for r in range(repeatition):
             "encoder": "/home/xvwenduan/GraphSOLID/ckpt/encoder/YelpChi/encoder_YelpChi_20251231_190604_e119_.pth",
             "decoder": "/home/xvwenduan/GraphSOLID/ckpt/decoder/YelpChi/decoder_YelpChi_20251231_190604_e119_.pth"
         }
-        emb_data = trainer.cent_pretrain(args, skip=False, ckpt_path=cktp_path, ckpt_save_epoch=0)
+        if args.joint_teacher_encoder:
+            emb_data = trainer.train_teacher_encoder_joint(args, skip=False, ckpt_path=cktp_path, ckpt_save_epoch=0)
+        else:
+            emb_data = trainer.cent_pretrain(args, skip=False, ckpt_path=cktp_path, ckpt_save_epoch=0)
         # cover data with initial embeddings
         trainer.update_data(emb_data)
-        trainer.train_teacher(epochs=args.epochs)
+        if not args.joint_teacher_encoder:
+            trainer.train_teacher(epochs=args.epochs)
         trainer.train_diffusion(args,ckpt_save_epoch=0)
 
         emb_data = emb_data.to(device)
