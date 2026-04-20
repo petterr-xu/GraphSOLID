@@ -150,6 +150,7 @@ for r in range(repeatition):
                            tab_diffusion, 
                            teacher_model, 
                            edge_decoder, 
+                           None,
                            classifier, 
                            encoder,
                            minority_mask,

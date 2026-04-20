@@ -60,23 +60,124 @@ class HeteroEdgePredicter(nn.Module):
             for edge_type in edge_types
         })
 
+    def _project(self, node_type, z):
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+        return self.node_projectors[node_type](z)
+
+    def score_aligned_pairs(self, src_emb, dst_emb, edge_type):
+        src_type, _, dst_type = edge_type
+        rel_key = "__".join(edge_type)
+        z_src = self._project(src_type, src_emb)
+        z_dst = self._project(dst_type, dst_emb)
+        z_src_rel = self.rel_weights[rel_key](z_src)
+        return (z_src_rel * z_dst).sum(dim=-1)
+
+    def score_query_candidates(self, query_emb, candidate_emb, edge_type, query_is_src=True):
+        src_type, _, dst_type = edge_type
+        rel_key = "__".join(edge_type)
+        if query_is_src:
+            query_proj = self.rel_weights[rel_key](self._project(src_type, query_emb))
+            candidate_proj = self._project(dst_type, candidate_emb)
+        else:
+            query_proj = self._project(dst_type, query_emb)
+            candidate_proj = self.rel_weights[rel_key](self._project(src_type, candidate_emb))
+        scores = query_proj @ candidate_proj.t()
+        if scores.size(0) == 1:
+            return scores.squeeze(0)
+        return scores
+
     def forward(self, z_dict, edge_index, edge_type):
         """
         z_dict: 节点嵌入字典 {type: tensor}
         edge_index: 当前预测的边索引
         edge_type: 当前预测的边类型三元组 ('src', 'rel', 'dst')
         """
-        src_type, rel_name, dst_type = edge_type
+        src_type, _, dst_type = edge_type
+        src_emb = z_dict[src_type][edge_index[0]]
+        dst_emb = z_dict[dst_type][edge_index[1]]
+        return self.score_aligned_pairs(src_emb, dst_emb, edge_type)
+
+class BudgetPredictor(nn.Module):
+    def __init__(self, num_feat, num_cls, num_edge_types, layers=2, drop=0.3):
+        super().__init__()
+        self.num_cls = num_cls
+        self.mlp = mlp.MLP(num_feat + num_cls, num_edge_types, layers=layers, drop=drop)
+        self.act = nn.ReLU()
+
+    def forward(self, node_emb, soft_labels, inference=False):
+        if node_emb.dim() == 1:
+            node_emb = node_emb.unsqueeze(0)
+        if soft_labels.dim() == 1:
+            soft_labels = soft_labels.unsqueeze(0)
+
+        if node_emb.size(0) != soft_labels.size(0):
+            raise ValueError(
+                f"node_emb batch size {node_emb.size(0)} != soft_labels batch size {soft_labels.size(0)}"
+            )
+        if soft_labels.size(-1) != self.num_cls:
+            raise ValueError(
+                f"soft_labels last dim must be {self.num_cls}, got {soft_labels.size(-1)}"
+            )
+
+        budget_scores = self.mlp(torch.cat([node_emb, soft_labels], dim=-1))
+        budgets = self.act(budget_scores)
+        if inference:
+            budgets = torch.round(budgets)
+        return budgets
+
+
+class AdaptiveEdgePredictor(nn.Module):
+    def __init__(
+        self,
+        node_types,
+        edge_types,
+        node_dim_dict,
+        n_hid,
+        num_cls,
+        budget_layers=2,
+        drop=0.3,
+    ):
+        super().__init__()
+        self.edge_types = list(edge_types)
+        self.edge_type_to_idx = {"__".join(edge_type): i for i, edge_type in enumerate(self.edge_types)}
+        self.edge_predictor = HeteroEdgePredicter(node_types, edge_types, node_dim_dict, n_hid)
+        self.budget_predictor = BudgetPredictor(
+            num_feat=n_hid,
+            num_cls=num_cls,
+            num_edge_types=len(self.edge_types),
+            layers=budget_layers,
+            drop=drop,
+        )
+
+    def forward(
+        self,
+        gen_emb,
+        soft_labels,
+        candidate_emb,
+        edge_type,
+        generated_node_type=None,
+        inference=False,
+    ):
         rel_key = "__".join(edge_type)
-        
-        # 1. 取出对应的嵌入并投影到统一维度
-        z_src = self.node_projectors[src_type](z_dict[src_type])
-        z_dst = self.node_projectors[dst_type](z_dict[dst_type])
-        
-        # 2. 应用关系变换矩阵
-        # 这里模拟了关系对嵌入的影响，使得不同关系下的同一对节点得分不同
-        z_src_rel = self.rel_weights[rel_key](z_src)
-        
-        # 3. 计算点积得分
-        scores = (z_src_rel[edge_index[0]] * z_dst[edge_index[1]]).sum(dim=-1)
-        return scores
+        if rel_key not in self.edge_type_to_idx:
+            raise KeyError(f"Unknown edge type: {edge_type}")
+
+        src_type, _, dst_type = edge_type
+        if generated_node_type is None:
+            generated_node_type = src_type
+        if generated_node_type not in (src_type, dst_type):
+            raise ValueError(
+                f"generated_node_type must be one of ({src_type}, {dst_type}), got {generated_node_type}"
+            )
+
+        query_is_src = generated_node_type == src_type
+        budgets = self.budget_predictor(gen_emb, soft_labels, inference=inference)
+        edge_budget = budgets[..., self.edge_type_to_idx[rel_key]]
+        scores = self.edge_predictor.score_query_candidates(
+            query_emb=gen_emb,
+            candidate_emb=candidate_emb,
+            edge_type=edge_type,
+            query_is_src=query_is_src,
+        )
+        return edge_budget, scores

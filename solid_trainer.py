@@ -1,4 +1,5 @@
 import copy
+import os
 import torch
 import random
 import warnings
@@ -21,9 +22,9 @@ from src.utils.hetero_dataset_util import HeteroGraphContext
 timestamp_format = "%Y%m%d_%H%M%S"
 root_path = osp.dirname(osp.realpath(__file__))
 class SolidTrainer:
-    def __init__(self, ctx: HeteroGraphContext, diffusion: nn.Module, teacher: nn.Module, edge_learner: nn.Module,  
+    def __init__(self, ctx: HeteroGraphContext, diffusion: nn.Module, teacher: nn.Module, edge_learner: nn.Module, budget_predictor: nn.Module, 
                     classifier: nn.Module, encoder: nn.Module, minority_mask,
-                    diff_lr=1e-4, tearch_lr=1e-3, el_lr=1e-3, cl_lr=1e-3, en_lr=1e-3, cent_lr=1e-3, 
+                    diff_lr=1e-4, tearch_lr=1e-3, el_lr=1e-3, bud_lr=1e-3, cl_lr=1e-3, en_lr=1e-3, cent_lr=1e-3, 
                     n_hid=512, diff_bs=64, r=None, plot=False, save_model=True, loss_type='ce', device='cuda:0'):
             
         self.ctx = ctx
@@ -44,6 +45,7 @@ class SolidTrainer:
         self.diffusion = diffusion.to(device)
         self.teacher = teacher.to(device)
         self.decoder = edge_learner.to(device)
+        self.budget_predictor = budget_predictor.to(device) if budget_predictor is not None else None
         self.classifier = classifier.to(device)
         self.encoder = encoder.to(device) if encoder else None
 
@@ -57,6 +59,8 @@ class SolidTrainer:
                                                                 factor = 0.8,
                                                                 patience = 100,
                                                                 verbose=False)
+        if self.budget_predictor is not None:
+            self.budget_optimizer = torch.optim.Adam(self.budget_predictor.parameters(), lr=bud_lr)
         
         if self.encoder is not None:
             self.en_optimizer = torch.optim.Adam(encoder.parameters(), lr=en_lr)
@@ -84,6 +88,80 @@ class SolidTrainer:
             # classifier_criterion = criterion.compute
         else:
             raise Exception("No Implentation Loss")
+
+    def _budget_target_matrix(self):
+        num_nodes = self.data[self.target].num_nodes
+        budget_targets = torch.zeros(num_nodes, len(self.data.edge_types), device=self.device)
+        for edge_idx, edge_type in enumerate(self.data.edge_types):
+            src_type, _, dst_type = edge_type
+            if self.target not in (src_type, dst_type):
+                continue
+            edge_index = self.data[edge_type].edge_index.to(self.device)
+            node_ids = edge_index[0] if src_type == self.target else edge_index[1]
+            counts = torch.bincount(node_ids, minlength=num_nodes).float()
+            budget_targets[:, edge_idx] = counts
+        return budget_targets
+
+    def train_budget_predictor_oneloop(self, args):
+        assert self.budget_predictor is not None, "budget_predictor is None."
+        target_budget = self._budget_target_matrix()
+
+        self.budget_predictor.train()
+        self.budget_optimizer.zero_grad()
+        train_emb = self.data[self.target].x[self.data_train_mask].to(self.device)
+        with torch.no_grad():
+            self.teacher.eval()
+            train_soft = self.teacher.softmax_with_temperature(train_emb, args.temperature)
+        pred_budget = self.budget_predictor(train_emb, train_soft, inference=False)
+        train_loss = F.smooth_l1_loss(pred_budget, target_budget[self.data_train_mask])
+        train_loss.backward()
+        self.budget_optimizer.step()
+
+        with torch.no_grad():
+            self.budget_predictor.eval()
+            val_emb = self.data[self.target].x[self.data_val_mask].to(self.device)
+            val_soft = self.teacher.softmax_with_temperature(val_emb, args.temperature)
+            val_pred = self.budget_predictor(val_emb, val_soft, inference=False)
+            val_loss = F.smooth_l1_loss(val_pred, target_budget[self.data_val_mask])
+
+        return train_loss.item(), val_loss.item()
+
+    def train_budget_predictor(self, args, epochs=None, skip=False, ckpt_path=None, ckpt_save_epoch=0):
+        assert self.budget_predictor is not None, "budget_predictor is None."
+        if skip:
+            assert ckpt_path is not None, "Please provide a valid checkpoint path to load the budget predictor."
+            VNG_utils.load(self.budget_predictor, ckpt_path)
+            print(f"Loaded budget predictor from {ckpt_path}")
+            return
+
+        train_epochs = epochs if epochs is not None else getattr(args, "bud_epochs", 200)
+        best_loss = float('inf')
+        patience = 5
+        patience_count = 0
+        patience_beta = 1e-3
+        with tqdm(total=train_epochs, desc="Budget Predictor Training") as pbar:
+            for e in range(train_epochs):
+                train_loss, val_loss = self.train_budget_predictor_oneloop(args)
+                if val_loss < (best_loss - patience_beta):
+                    best_loss = val_loss
+                    patience_count = 0
+                else:
+                    patience_count += 1
+                pbar.set_postfix({
+                    'Train Loss': f'{train_loss:.4f}',
+                    'Val Loss': f'{val_loss:.4f}',
+                    'Patience': f'{patience_count}/{patience}'
+                })
+                pbar.update(1)
+                if ckpt_save_epoch > 0 and ((e + 1) % ckpt_save_epoch == 0):
+                    ts = datetime.now().strftime(timestamp_format)
+                    path = osp.join(root_path, "ckpt", "budget", self.ctx.name, "budget_" + self.ctx.name + "_" + ts + f"_e{e}_" + ".pth")
+                    os.makedirs(osp.dirname(path), exist_ok=True)
+                    VNG_utils.save(self.budget_predictor, path)
+                if patience_count >= patience:
+                    pbar.write(f"Early stopping at epoch {e+1}")
+                    pbar.close()
+                    break
 
     def _build_emb_data(self):
         self.encoder.eval()

@@ -28,6 +28,9 @@ def parse_args():
     ## decoder setup
     parser.add_argument('--de_lr', type=float, default=1e-3, help='learning rate for decoder')
     parser.add_argument('--decoder_hid',type=int,default=32)
+    parser.add_argument('--adaptive_budgets', action='store_true', help='use adaptive budgets for edge learning')
+    parser.add_argument('--bud_lr', type=float, default=1e-3, help='learning rate for budget predictor')
+    parser.add_argument('--bud_epochs', type=int, default=200, help='epochs for budget predictor training')
 
     ## teacher setup
     parser.add_argument('--teacher_lr', type=float, default=1e-3, help='learning rate for teacher model')

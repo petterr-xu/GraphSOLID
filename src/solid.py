@@ -128,7 +128,8 @@ def softlabel_based_hard_nodes_sampling(x:torch.tensor,y,n_cls,diffusion_model,t
     x0 = x0.squeeze(1)
     v_info = {
         "feat": torch.detach(x0),
-        "label": torch.detach(all_labels.to(y.dtype))
+        "label": torch.detach(all_labels.to(y.dtype)),
+        "soft_label": torch.detach(all_guidances),
     }
 
     torch.cuda.empty_cache()
@@ -378,7 +379,17 @@ def isolate_sampling_test(x,y,class_,n_cls,diffusion_model,teacher,temperature, 
     print(preds)
 
 @torch.no_grad()
-def add_new_hetero_nodes_all_relations(data, feats, labels, edge_predicter, target_node, device='cuda:0'):
+def add_new_hetero_nodes_all_relations(
+    data,
+    feats,
+    labels,
+    edge_predicter,
+    target_node,
+    budget_predictor=None,
+    soft_labels=None,
+    adaptive_budgets=False,
+    device='cuda:0',
+):
     """
     自动识别 target_node 涉及的所有关系，并为其建立连接。
     """
@@ -415,37 +426,69 @@ def add_new_hetero_nodes_all_relations(data, feats, labels, edge_predicter, targ
     # 遍历每一个关系进行“局部连边”
     for etype in related_edge_types:
         print(f"   -> Processing relation: {etype}...")
-        data = _connect_single_relation(data, ori_num, new_node_num, labels, edge_predicter, etype, device)
+        data = _connect_single_relation(
+            data,
+            ori_num,
+            new_node_num,
+            feats,
+            labels,
+            edge_predicter,
+            etype,
+            target_node,
+            budget_predictor=budget_predictor,
+            soft_labels=soft_labels,
+            adaptive_budgets=adaptive_budgets,
+            device=device,
+        )
         
     return data
 
-def _connect_single_relation(data, ori_num, new_node_num, new_labels, edge_predicter, edge_type, device):
+def _connect_single_relation(
+    data,
+    ori_num,
+    new_node_num,
+    new_feats,
+    new_labels,
+    edge_predicter,
+    edge_type,
+    target_node,
+    budget_predictor=None,
+    soft_labels=None,
+    adaptive_budgets=False,
+    device='cuda:0',
+):
     src_type, rel, dst_type = edge_type
+    target_is_src = (src_type == target_node)
+    target_is_dst = (dst_type == target_node)
+    if not (target_is_src or target_is_dst):
+        raise ValueError(f"target_node {target_node} not in edge_type {edge_type}")
     
     # 确定候选目标节点的范围
     if src_type == dst_type:
         # 如果是同类关系（如 rur），我们只让新节点连向“原始节点”
         # 避免新节点之间互相建立没有根据的连接
-        num_dst_nodes = ori_num
+        num_candidate_nodes = ori_num
     else:
         # 如果是异类关系（如 r-u, r-i），目标节点类型的所有节点都是候选
-        num_dst_nodes = data[dst_type].num_nodes
+        candidate_type = dst_type if target_is_src else src_type
+        num_candidate_nodes = data[candidate_type].num_nodes
 
     # 构造目标候选索引 [0, 1, ..., num_dst_nodes - 1]
-    candidate_dst_indices = torch.arange(num_dst_nodes, device=device)
+    candidate_indices = torch.arange(num_candidate_nodes, device=device)
 
     # 2. 获取 z_dict (用于 predicter)
     z_dict = {ntype: data[ntype].x for ntype in data.node_types}
     
     # 3. 统计度分布 (用于采样连边数 d)
     curr_edge_index = data[edge_type].edge_index
-    col = curr_edge_index[1]
-    # 注意：这里的 dim_size 必须是该关系目标类型的总节点数
-    degree = scatter_add(torch.ones_like(col), col, dim=0, dim_size=data[dst_type].num_nodes)
+    target_side = curr_edge_index[0] if target_is_src else curr_edge_index[1]
+    degree = scatter_add(torch.ones_like(target_side), target_side, dim=0, dim_size=data[target_node].num_nodes)
     
     new_edges_src = []
     new_edges_dst = []
     edge_predicter.eval()
+    if budget_predictor is not None:
+        budget_predictor.eval()
 
     # 连边循环
     pbar = tqdm(range(0, new_node_num), desc="Edges connecting", total=new_node_num)
@@ -453,31 +496,49 @@ def _connect_single_relation(data, ori_num, new_node_num, new_labels, edge_predi
         new_idx = ori_num + i
         
         # 确定连边数 d
-        if src_type == dst_type:
-            ref_mask = (data[dst_type].y[:ori_num] == new_labels[i])
-            c_degree = degree[:ori_num][ref_mask]
+        if adaptive_budgets and budget_predictor is not None and soft_labels is not None:
+            budget_vec = budget_predictor(
+                new_feats[i].to(device),
+                soft_labels[i].to(device),
+                inference=True,
+            ).view(-1)
+            d = int(budget_vec[list(data.edge_types).index(edge_type)].item())
         else:
-            c_degree = degree[:num_dst_nodes]
-            
-        if c_degree.numel() == 0 or c_degree.max() == 0:
-            d = 2 
-        else:
-            degree_dist = torch.bincount(c_degree.to(torch.long), minlength=int(c_degree.max().item()) + 1)
-            d = torch.multinomial(degree_dist.to(dtype=torch.float32), 1).item()
-            d = max(d, 1)
+            if src_type == dst_type:
+                ref_mask = (data[target_node].y[:ori_num] == new_labels[i])
+                c_degree = degree[:ori_num][ref_mask]
+            else:
+                c_degree = degree[:ori_num]
+            if c_degree.numel() == 0 or c_degree.max() == 0:
+                d = 2
+            else:
+                degree_dist = torch.bincount(c_degree.to(torch.long), minlength=int(c_degree.max().item()) + 1)
+                d = torch.multinomial(degree_dist.to(dtype=torch.float32), 1).item()
+                d = max(d, 1)
+        if d <= 0:
+            continue
+        d = min(d, num_candidate_nodes)
+        if d <= 0:
+            continue
 
         # 构造全连接候选边进行打分
         # candidate_edges 形状: [2, num_dst_nodes]
-        candidate_edges = torch.stack([
-            torch.full((num_dst_nodes,), new_idx, dtype=torch.long, device=device),
-            candidate_dst_indices
-        ], dim=0)
+        if target_is_src:
+            candidate_edges = torch.stack([
+                torch.full((num_candidate_nodes,), new_idx, dtype=torch.long, device=device),
+                candidate_indices
+            ], dim=0)
+        else:
+            candidate_edges = torch.stack([
+                candidate_indices,
+                torch.full((num_candidate_nodes,), new_idx, dtype=torch.long, device=device),
+            ], dim=0)
         
         # 利用 predicter.forward 计算得分
         scores = edge_predicter(z_dict, candidate_edges, edge_type)
         
         # 筛选 Top-K
-        k = min(4 * d, num_dst_nodes)
+        k = min(4 * d, num_candidate_nodes)
         # top_scores: 前 k 个最高分, top_idx_in_candidate: 对应的索引
         top_scores, top_idx_in_candidate = torch.topk(scores, k)
         
@@ -492,10 +553,13 @@ def _connect_single_relation(data, ori_num, new_node_num, new_labels, edge_predi
         sel_idx = torch.multinomial(sampling_weights, d, replacement=False)
         
         # 5. 获取最终的目标节点索引
-        sampled_dst_nodes = candidate_dst_indices[top_idx_in_candidate[sel_idx]]
-        
-        new_edges_src.append(torch.full((d,), new_idx, dtype=torch.long, device=device))
-        new_edges_dst.append(sampled_dst_nodes)
+        sampled_candidate_nodes = candidate_indices[top_idx_in_candidate[sel_idx]]
+        if target_is_src:
+            new_edges_src.append(torch.full((d,), new_idx, dtype=torch.long, device=device))
+            new_edges_dst.append(sampled_candidate_nodes)
+        else:
+            new_edges_src.append(sampled_candidate_nodes)
+            new_edges_dst.append(torch.full((d,), new_idx, dtype=torch.long, device=device))
 
     # 物理合并边
     if new_edges_src:

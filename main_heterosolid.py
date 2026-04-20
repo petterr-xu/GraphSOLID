@@ -85,12 +85,12 @@ def save_metrics_to_csv(
 
 def save_emb_data(data, save_dir, filename="emb_data.pt"):
     assert data is not None, "Please run cent_pretrain() or train_teacher_encoder_joint() first."
-    osp.makedirs(save_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
     save_path = osp.join(save_dir, filename)
     torch.save(data.cpu(), save_path)
     return save_path
 
-def load_emb_data(data, path, update_data=False):
+def load_emb_data(path, update_data=False):
     emb_data = torch.load(path, map_location=device).to(device)
     return emb_data
 
@@ -173,6 +173,7 @@ for r in range(repeatition):
         "diff_lr" : args.dif_lr,
         "tearch_lr" : args.teacher_lr,
         "el_lr" : args.de_lr,
+        "bud_lr" : args.bud_lr,
         "cl_lr" : args.lr, 
         "diff_bs" : args.batch_size,
         "n_hid" : args.n_hid,
@@ -189,6 +190,10 @@ for r in range(repeatition):
         node_type: args.n_hid # hetero_ctx.g[node_type].x.shape[1] 
         for node_type in node_types
     }
+    if args.adaptive_budgets:
+        budget_predictor = edge_learner.BudgetPredictor(num_feat=args.n_hid, num_cls=n_cls, num_edge_types=len(edge_types)).to(device)
+    else:
+        budget_predictor = None
     edge_decoder = edge_learner.HeteroEdgePredicter(
         node_types=node_types,
         edge_types=edge_types,
@@ -202,6 +207,7 @@ for r in range(repeatition):
                            diffusion_model, 
                            teacher_model, 
                            edge_decoder, 
+                           budget_predictor,
                            classifier, 
                            encoder,
                            minority_mask,
@@ -222,6 +228,8 @@ for r in range(repeatition):
         trainer.update_data(emb_data)
         if not args.joint_teacher_encoder:
             trainer.train_teacher(epochs=args.epochs)
+        if budget_predictor is not None:
+            trainer.train_budget_predictor(args, epochs=args.bud_epochs)
         trainer.train_diffusion(args,ckpt_save_epoch=0)
 
         emb_data = emb_data.to(device)
@@ -243,6 +251,9 @@ for r in range(repeatition):
                                                             v_information['feat'],
                                                             v_information['label'],
                                                             edge_decoder,
+                                                            budget_predictor=budget_predictor,
+                                                            soft_labels=v_information.get('soft_label'),
+                                                            adaptive_budgets=args.adaptive_budgets,
                                                             target_node=hetero_ctx.target_node,
                                                             device=device)
         # update trainer data
