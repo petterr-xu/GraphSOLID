@@ -5,6 +5,7 @@ import pytorch_lightning as pl
 import time
 import wandb
 import os
+from torch_geometric.utils import to_dense_batch
 
 from .models.transformer_model import GraphTransformer
 from .diffusion.noise_schedule import DiscreteUniformTransition, PredefinedNoiseScheduleDiscrete,\
@@ -17,7 +18,7 @@ from . import utils
 
 class DiscreteDenoisingDiffusion(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools, extra_features,
-                 domain_features):
+                 domain_features, task_classifier=None):
         super().__init__()
 
         input_dims = dataset_infos.input_dims
@@ -93,7 +94,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             self.limit_dist = utils.PlaceHolder(X=x_marginals, E=e_marginals,
                                                 y=torch.ones(self.ydim_output) / self.ydim_output)
 
-        self.save_hyperparameters(ignore=['train_metrics', 'sampling_metrics'])
+        self.save_hyperparameters(ignore=['train_metrics', 'sampling_metrics', 'task_classifier'])
         self.start_epoch_time = None
         self.train_iterations = None
         self.val_iterations = None
@@ -101,6 +102,15 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.number_chain_steps = cfg.general.number_chain_steps
         self.best_val_nll = 1e8
         self.val_counter = 0
+        self.use_task_constraint = bool(getattr(cfg.general, 'use_task_constraint', False))
+        self.task_constraint_lambda_max = float(getattr(cfg.general, 'task_constraint_lambda_max', 0.0))
+        self.task_constraint_gamma = float(getattr(cfg.general, 'task_constraint_gamma', 1.0))
+        self.task_constraint_tau = float(getattr(cfg.general, 'task_constraint_tau', 1.0))
+        object.__setattr__(self, "_task_classifier", task_classifier)
+        if task_classifier is not None:
+            for param in task_classifier.parameters():
+                param.requires_grad = False
+            task_classifier.eval()
 
     def training_step(self, data, i):
         if data.edge_index.numel() == 0:
@@ -112,9 +122,11 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         noisy_data = self.apply_noise(X, E, data.y, node_mask)
         extra_data = self.compute_extra_data(noisy_data)
         pred = self.forward(noisy_data, extra_data, node_mask)
-        loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
-                               true_X=X, true_E=E, true_y=data.y,
-                               log=i % self.log_every_steps == 0)
+        diffusion_loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
+                                         true_X=X, true_E=E, true_y=data.y,
+                                         log=i % self.log_every_steps == 0)
+        task_loss = self.compute_task_constraint_loss(pred=pred, dense_X=X, data=data, node_mask=node_mask, noisy_data=noisy_data)
+        loss = diffusion_loss + task_loss
 
         self.train_metrics(masked_pred_X=pred.X, masked_pred_E=pred.E, true_X=X, true_E=E,
                            log=i % self.log_every_steps == 0)
@@ -128,6 +140,10 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
     def on_fit_start(self) -> None:
         self.train_iterations = len(self.trainer.datamodule.train_dataloader())
         self.print("Size of the input features", self.Xdim, self.Edim, self.ydim)
+        task_classifier = getattr(self, "_task_classifier", None)
+        if task_classifier is not None:
+            task_classifier.to(self.device)
+            task_classifier.eval()
         if self.local_rank == 0:
             utils.setup_wandb(self.cfg)
 
@@ -488,6 +504,55 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         # y指的是图级的特征，编码了整个图的信息（包含时间步t）
         y = torch.hstack((noisy_data['y_t'], extra_data.y)).float()
         return self.model(X, E, y, node_mask)
+
+    def _task_constraint_weight(self, t: torch.Tensor) -> torch.Tensor:
+        return self.task_constraint_lambda_max * torch.pow(1 - t, self.task_constraint_gamma)
+
+    def compute_task_constraint_loss(self, pred, dense_X, data, node_mask, noisy_data):
+        task_classifier = getattr(self, "_task_classifier", None)
+        if not self.use_task_constraint or task_classifier is None or self.task_constraint_lambda_max <= 0:
+            return pred.E.new_tensor(0.0)
+
+        if hasattr(data, "node_y"):
+            labels_flat = data.node_y.view(-1).long()
+        elif data.x.dim() == 2 and data.x.size(-1) > 1:
+            labels_flat = data.x.argmax(dim=-1).long()
+        else:
+            raise ValueError("Task constraint requires node labels. Add node_y to the multiview dataset.")
+
+        if hasattr(data, "train_mask"):
+            task_mask_flat = data.train_mask.bool()
+        else:
+            task_mask_flat = torch.ones_like(labels_flat, dtype=torch.bool)
+
+        label_dense, _ = to_dense_batch(labels_flat, data.batch, fill_value=-1)
+        task_mask_dense, _ = to_dense_batch(task_mask_flat.long(), data.batch, fill_value=0)
+        task_mask_dense = task_mask_dense.bool() & node_mask & (label_dense >= 0)
+        if not task_mask_dense.any():
+            return pred.E.new_tensor(0.0)
+
+        soft_e = F.gumbel_softmax(pred.E, tau=self.task_constraint_tau, hard=False, dim=-1)
+        soft_e = 0.5 * (soft_e + torch.transpose(soft_e, 1, 2))
+        if soft_e.size(-1) >= 2:
+            diag_mask = torch.eye(soft_e.size(1), device=soft_e.device, dtype=torch.bool).unsqueeze(0).unsqueeze(-1)
+            no_edge = torch.zeros(soft_e.size(-1), device=soft_e.device, dtype=soft_e.dtype)
+            no_edge[0] = 1.0
+            soft_e = torch.where(diag_mask, no_edge.view(1, 1, 1, -1), soft_e)
+
+        task_classifier.eval()
+        logits = task_classifier(dense_X, soft_e, node_mask)
+        per_node_loss = F.cross_entropy(
+            logits.transpose(1, 2),
+            label_dense.clamp_min(0),
+            reduction='none',
+        )
+        lambda_t = self._task_constraint_weight(noisy_data['t']).expand_as(per_node_loss)
+        weighted_loss = per_node_loss * lambda_t * task_mask_dense.float()
+        denom = task_mask_dense.float().sum().clamp(min=1.0)
+        task_loss = weighted_loss.sum() / denom
+        if wandb.run:
+            wandb.log({"train/task_constraint_loss": task_loss.detach()}, commit=False)
+        return task_loss
 
     @torch.no_grad()
     def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,

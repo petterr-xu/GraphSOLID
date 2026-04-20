@@ -16,6 +16,7 @@ from src.utils import VNG_utils, graphbuilder
 from src.utils.hetero_dataset_util import GraphDataLoader
 from src.DiGress.src import utils
 from src.DiGress.src.diffusion_model_discrete import DiscreteDenoisingDiffusion
+from src.models.soft_multiview_classifier import SoftMultiViewClassifier
 warnings.filterwarnings("ignore")
 
 os.environ["WANDB_MODE"] = "disabled"
@@ -114,7 +115,14 @@ def main(cfg: DictConfig):
         raise NotImplementedError("Unknown dataset {}".format(cfg["dataset"]))
 
     utils.create_folders(cfg)
-    model = DiscreteDenoisingDiffusion(cfg=cfg, **model_kwargs)
+    task_classifier = None
+    if bool(getattr(cfg.general, "use_task_constraint", False)):
+        ckpt_path = getattr(cfg.general, "task_classifier_ckpt", None)
+        if not ckpt_path:
+            raise ValueError("general.task_classifier_ckpt must be set when general.use_task_constraint=true")
+        task_classifier = SoftMultiViewClassifier.load_checkpoint(ckpt_path, map_location="cpu")
+
+    model = DiscreteDenoisingDiffusion(cfg=cfg, task_classifier=task_classifier, **model_kwargs)
 
     callbacks = []
     if cfg.train.save_model:

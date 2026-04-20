@@ -42,6 +42,21 @@ general_edge_perturb_ratio: 0.15
 # defender settings
 defense_method: 'diffusion'   # 'none' | 'diffusion' | 'jaccard' | 'gprgae'
 purify_steps: 10
+use_task_constraint: false
+task_classifier_ckpt: null
+task_constraint_lambda_max: 0.1
+task_constraint_gamma: 2.0
+task_constraint_tau: 1.0
+task_classifier_hidden_dim: 64
+task_classifier_num_layers: 2
+task_classifier_dropout: 0.1
+task_classifier_use_input_x: false
+task_classifier_fusion: 'attention'
+task_classifier_lr: 0.001
+task_classifier_weight_decay: 0.0001
+task_classifier_epochs: 100
+task_classifier_patience: 10
+task_classifier_output: './outputs/task_classifier.pt'
 jaccard_threshold: 0.01
 jaccard_binarize: true
 jaccard_remove_self_loops: true

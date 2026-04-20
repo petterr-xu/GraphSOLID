@@ -51,6 +51,7 @@ class YelpChiMultiviewDataset(Dataset):
             
             for v_idx, mp in enumerate(self.metapaths):
                 view_data = extract_view_by_transform(h_sub, mp, self.target)
+                view_data.node_y = view_data.y.clone()
 
                 # DiGress expects symmetric adjacency; ensure every edge has its reverse.
                 if view_data.edge_index is not None and view_data.edge_index.numel() > 0:
